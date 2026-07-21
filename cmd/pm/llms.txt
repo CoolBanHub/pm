@@ -14,6 +14,7 @@ console's static assets are embedded in the binary. No telemetry is collected.
 make install            # or: go install ./cmd/pm   (needs Go 1.26+)
 pm daemon -d            # start the daemon in the background (or run under launchd/systemd)
 sudo pm systemd         # Linux: install, enable at boot, and start pm.service
+pm update               # update this binary from the latest GitHub release
 pm list                 # compact list of managed processes
 pm status               # detailed table (CPU, memory, uptime, restarts, exit)
 ```
@@ -42,6 +43,7 @@ directory takes priority over `~/.pm/pm.yaml` when `-config` is omitted.
 pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
 pm [-socket PATH] up [-config FILE] [-d] [-log FILE]  # alias for daemon
 pm systemd [-config FILE]                    # Linux system service installation (run with sudo)
+pm update                                      # download and install latest GitHub release
 pm [-socket PATH] status [NAME...]        # full details for all or named programs
 pm [-socket PATH] list   [NAME...]        # compact overview: NAME GROUP STATE PID UPTIME
 pm [-socket PATH] start|stop|restart NAME|all
@@ -67,6 +69,14 @@ On Linux, `sudo pm systemd` installs the current binary as
 and hands an existing daemon over to systemd. The service runs as the original
 sudo user and uses a current-directory `pm.yaml` when present, otherwise that
 user's `~/.pm/pm.yaml`. Pass `-config FILE` to choose another file.
+
+`pm update` queries the latest stable GitHub Release. If its tag equals the
+compiled-in current version, no files are downloaded. Otherwise PM downloads
+the matching `pm-<os>-<arch>` asset, verifies its GitHub SHA-256 digest (falling
+back to `SHA256SUMS` for older releases) and the downloaded binary's reported
+version, then atomically replaces the current executable. Use `sudo pm update`
+when it is installed in a root-owned directory.
+A running daemon keeps the old code until it is restarted.
 
 CLI socket resolution order: `-socket PATH` flag → `PM_SOCKET` env → `socket`
 field from the config → `~/.pm/pm.sock`.

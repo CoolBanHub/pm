@@ -71,6 +71,8 @@ func run(args []string) error {
 		return daemonCommand(args)
 	case "systemd":
 		return systemdCommand(args)
+	case "update":
+		return updateCommand(args)
 	case "status", "start", "stop", "restart", "pause", "resume", "disable", "enable":
 		resolvedSocket, err := resolveControlSocket(*socket)
 		if err != nil {
@@ -569,6 +571,7 @@ func usage(writer io.Writer) {
   pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
   pm [-socket PATH] up [-config FILE] [-d] [-log FILE]
   pm systemd [-config FILE]
+  pm update
   pm [-socket PATH] status [NAME...]
   pm [-socket PATH] list [NAME...]
   pm [-socket PATH] start|stop|restart NAME|all

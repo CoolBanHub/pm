@@ -23,7 +23,7 @@ func TestUsageShowsShortDetachFlag(t *testing.T) {
 func TestUsageShowsSystemdAndPersistentModes(t *testing.T) {
 	var output bytes.Buffer
 	usage(&output)
-	for _, command := range []string{"pm systemd [-config FILE]", "pause|resume|disable|enable"} {
+	for _, command := range []string{"pm systemd [-config FILE]", "pm update", "pause|resume|disable|enable"} {
 		if !strings.Contains(output.String(), command) {
 			t.Fatalf("usage does not advertise %q: %q", command, output.String())
 		}

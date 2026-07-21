@@ -73,6 +73,18 @@ sudo ./bin/pm systemd -config /etc/pm/pm.yaml
 
 服务以发起 sudo 的用户身份运行，不会把受管程序意外切换为 root。安装后可用 `systemctl status pm` 和 `journalctl -u pm -f` 查看服务状态与 daemon 日志。
 
+## 更新
+
+从 GitHub 最新正式 Release 更新当前 PM 二进制：
+
+```bash
+pm update
+```
+
+PM 会先比较当前版本和最新 Release tag；版本一致时直接退出，不重复下载。需要更新时会选择当前操作系统与架构对应的产物，使用 GitHub Release asset 的 SHA-256 digest 校验（旧 Release 回退到 `SHA256SUMS`），并确认下载文件报告的版本正确后原子替换当前二进制。安装在 `/usr/local/bin/pm` 等系统目录时使用 `sudo pm update`。
+
+更新只替换二进制文件，不会中断正在运行的 daemon。使用 systemd 时执行 `sudo systemctl restart pm`，使用 `pm up -d` 时执行 `pm down` 后重新 `pm up -d`，即可让常驻进程运行新版本。
+
 示例配置的管理后台地址为 [http://127.0.0.1:19090](http://127.0.0.1:19090)。后台模式下，守护进程日志写入 `~/.pm/logs/pm-daemon.log`（或配置目录下的 `logs/pm-daemon.log`）。
 
 ## 命令行控制
