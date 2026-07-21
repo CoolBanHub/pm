@@ -1,0 +1,27 @@
+[Unit]
+Description=PM Process Manager
+After=network.target
+
+[Service]
+Type=simple
+User=pm
+Group=pm
+WorkingDirectory=/var/lib/pm
+ExecStart=/usr/local/bin/pm daemon -config /etc/pm/pm.yaml
+ExecReload=/usr/local/bin/pm -socket /run/pm/pm.sock reload
+EnvironmentFile=/etc/pm/pm.env
+
+RuntimeDirectory=pm
+RuntimeDirectoryMode=0750
+StateDirectory=pm
+StateDirectoryMode=0750
+
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=30
+TimeoutStartSec=10
+
+[Install]
+WantedBy=multi-user.target

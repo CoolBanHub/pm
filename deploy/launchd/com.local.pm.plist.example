@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.pm</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/absolute/path/to/pm</string>
+    <string>daemon</string>
+    <string>-config</string>
+    <string>/absolute/path/to/pm.yaml</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/absolute/path/to/project</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/absolute/path/to/pm-service.log</string>
+  <key>StandardErrorPath</key>
+  <string>/absolute/path/to/pm-service.error.log</string>
+</dict>
+</plist>

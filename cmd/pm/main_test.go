@@ -1,0 +1,106 @@
+package main
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/CoolBanHub/pm/internal/config"
+)
+
+func TestUsageShowsShortDetachFlag(t *testing.T) {
+	var output bytes.Buffer
+	usage(&output)
+	if !strings.Contains(output.String(), "daemon [-config FILE] [-d]") {
+		t.Fatalf("usage does not advertise -d: %q", output.String())
+	}
+}
+
+func TestLoadDaemonConfigUsesDefaultsOnlyWhenOptional(t *testing.T) {
+	path := filepath.Join(t.TempDir(), config.DefaultFile)
+	cfg, err := loadDaemonConfig(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Socket != config.DefaultSocket || !cfg.Web.Enabled || len(cfg.Programs) != 0 {
+		t.Fatalf("defaults = %+v", cfg)
+	}
+	if _, err := loadDaemonConfig(path, false); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("explicit missing config error = %v", err)
+	}
+}
+
+func TestResolveControlSocketPriorityAndCurrentConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultFile)
+	if err := os.WriteFile(path, []byte("socket: run/pm.sock\nweb:\n  enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fromConfig, err := resolveControlSocketAt("", "", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "run/pm.sock"); fromConfig != want {
+		t.Fatalf("socket from config = %q, want %q", fromConfig, want)
+	}
+	fromEnvironment, err := resolveControlSocketAt("", "/env/pm.sock", path)
+	if err != nil || fromEnvironment != "/env/pm.sock" {
+		t.Fatalf("socket from environment = %q, err = %v", fromEnvironment, err)
+	}
+	fromFlag, err := resolveControlSocketAt("/flag/pm.sock", "/env/pm.sock", path)
+	if err != nil || fromFlag != "/flag/pm.sock" {
+		t.Fatalf("socket from flag = %q, err = %v", fromFlag, err)
+	}
+	fallback, err := resolveControlSocketAt("", "", filepath.Join(dir, "missing.yaml"))
+	if err != nil || fallback != config.DefaultSocket {
+		t.Fatalf("fallback socket = %q, err = %v", fallback, err)
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	if got := formatBytes(2 * 1024 * 1024); got != "2.0MiB" {
+		t.Fatalf("formatBytes = %q", got)
+	}
+}
+
+func TestReadLastLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree\nfour\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	got, err := readLastLines(file, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "three\nfour" {
+		t.Fatalf("tail = %q", got)
+	}
+}
+
+func TestReadLastLinesWithoutTrailingNewline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	got, err := readLastLines(file, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "three" {
+		t.Fatalf("tail = %q", got)
+	}
+}
