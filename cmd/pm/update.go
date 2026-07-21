@@ -74,8 +74,80 @@ func updateCommand(args []string) error {
 		output:         os.Stdout,
 		validate:       validateDownloadedBinary,
 	}
-	_, err = updater.run(ctx)
-	return err
+	updated, err := updater.run(ctx)
+	if err != nil || !updated {
+		return err
+	}
+	return handlePostUpdate(os.Stdin, os.Stdout, isInteractiveTerminal(os.Stdin), systemdPMUsesExecutable(executable), func() error {
+		return runSystemctl("restart", "pm.service")
+	})
+}
+
+func handlePostUpdate(input io.Reader, output io.Writer, interactive, systemdActive bool, restart func() error) error {
+	const processImpact = "Restarting PM gracefully stops all managed programs; only autostart programs that are not paused or disabled start again."
+	if !systemdActive {
+		fmt.Fprintln(output, "No active pm.service using this binary was found. If a PM daemon is running, it still uses the previous version and must be restarted manually.")
+		fmt.Fprintln(output, processImpact)
+		fmt.Fprintln(output, "For a detached daemon, run: pm down && pm up -d")
+		return nil
+	}
+	if !interactive {
+		fmt.Fprintln(output, "The running pm.service still uses the previous version.")
+		fmt.Fprintln(output, processImpact)
+		fmt.Fprintln(output, "Restart it with: sudo systemctl restart pm.service")
+		return nil
+	}
+
+	fmt.Fprintln(output, processImpact)
+	fmt.Fprint(output, "Restart pm.service now? [y/N]: ")
+	answer, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read restart confirmation: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		if restart == nil {
+			return errors.New("systemd restart is unavailable")
+		}
+		if err := restart(); err != nil {
+			return fmt.Errorf("restart pm.service after update: %w", err)
+		}
+		fmt.Fprintln(output, "pm.service restarted; the updated daemon is now active.")
+	default:
+		fmt.Fprintln(output, "pm.service was not restarted. Run sudo systemctl restart pm.service when ready.")
+	}
+	return nil
+}
+
+func isInteractiveTerminal(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func systemdPMUsesExecutable(executable string) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return false
+	}
+	if exec.Command("systemctl", "is-active", "--quiet", "pm.service").Run() != nil {
+		return false
+	}
+	data, err := exec.Command("systemctl", "show", "--property=MainPID", "--value", "pm.service").Output()
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	runningExecutable, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	if err != nil {
+		return false
+	}
+	runningExecutable = strings.TrimSuffix(runningExecutable, " (deleted)")
+	return filepath.Clean(runningExecutable) == filepath.Clean(executable)
 }
 
 func (u selfUpdater) run(ctx context.Context) (bool, error) {

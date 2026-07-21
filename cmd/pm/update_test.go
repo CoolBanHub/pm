@@ -52,6 +52,58 @@ func TestUpdateCommandRejectsArguments(t *testing.T) {
 	}
 }
 
+func TestHandlePostUpdateRestartsActiveSystemdServiceAfterConfirmation(t *testing.T) {
+	var output bytes.Buffer
+	restarts := 0
+	err := handlePostUpdate(strings.NewReader("yes\n"), &output, true, true, func() error {
+		restarts++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarts != 1 || !strings.Contains(output.String(), "managed programs") || !strings.Contains(output.String(), "updated daemon is now active") {
+		t.Fatalf("restarts=%d output=%q", restarts, output.String())
+	}
+}
+
+func TestHandlePostUpdateDeclinesRestartByDefault(t *testing.T) {
+	var output bytes.Buffer
+	restarts := 0
+	if err := handlePostUpdate(strings.NewReader("\n"), &output, true, true, func() error {
+		restarts++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if restarts != 0 || !strings.Contains(output.String(), "was not restarted") {
+		t.Fatalf("restarts=%d output=%q", restarts, output.String())
+	}
+}
+
+func TestHandlePostUpdateDoesNotPromptNonInteractiveCommand(t *testing.T) {
+	var output bytes.Buffer
+	if err := handlePostUpdate(strings.NewReader("yes\n"), &output, false, true, func() error {
+		t.Fatal("restart should not run without interactive confirmation")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "sudo systemctl restart pm.service") || strings.Contains(output.String(), "[y/N]") {
+		t.Fatalf("output=%q", output.String())
+	}
+}
+
+func TestHandlePostUpdateExplainsDetachedRestart(t *testing.T) {
+	var output bytes.Buffer
+	if err := handlePostUpdate(strings.NewReader(""), &output, true, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "pm down && pm up -d") || !strings.Contains(output.String(), "No active pm.service") {
+		t.Fatalf("output=%q", output.String())
+	}
+}
+
 func TestSelfUpdaterDownloadsVerifiesAndReplaces(t *testing.T) {
 	binary := []byte("new-pm-binary")
 	server := updateTestServer(t, "v2.0.0", binary, checksumLine(binary, "pm-darwin-arm64"))

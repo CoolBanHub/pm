@@ -78,7 +78,12 @@ extracts the executable, checks its reported version, then atomically replaces
 the current executable. Use `sudo pm update` when it is installed in a
 root-owned directory. Manually downloaded archives contain `pm` with mode
 `0755`, so `tar -xzf pm-<os>-<arch>.tar.gz` needs no subsequent `chmod`.
-A running daemon keeps the old code until it is restarted.
+A running daemon keeps the old code until it is restarted. After an interactive
+update, an active systemd-managed pm.service prompts for an immediate restart;
+non-interactive updates print the restart command instead. Restarting PM stops
+all managed programs, then starts only autostart programs that are neither
+paused nor disabled. Detached daemons must be restarted with `pm down` followed
+by `pm up -d`.
 
 CLI socket resolution order: `-socket PATH` flag → `PM_SOCKET` env → `socket`
 field from the config → `~/.pm/pm.sock`.

@@ -83,7 +83,7 @@ pm update
 
 PM 会先比较当前版本和最新 Release tag；版本一致时直接退出，不重复下载。需要更新时会选择当前操作系统与架构对应的产物，使用 GitHub Release asset 的 SHA-256 digest 校验（旧 Release 回退到 `SHA256SUMS`），并确认下载文件报告的版本正确后原子替换当前二进制。安装在 `/usr/local/bin/pm` 等系统目录时使用 `sudo pm update`。
 
-更新只替换二进制文件，不会中断正在运行的 daemon。使用 systemd 时执行 `sudo systemctl restart pm`，使用 `pm up -d` 时执行 `pm down` 后重新 `pm up -d`，即可让常驻进程运行新版本。
+更新只替换二进制文件，不会中断正在运行的 daemon。检测到正在运行的 `pm.service` 时，交互式更新会询问是否立即重启；非交互式更新会打印 `sudo systemctl restart pm.service` 提示但不会自行重启。使用 `pm up -d` 时仍需执行 `pm down` 后重新 `pm up -d`。重启 PM 会优雅停止所有受管程序，随后只自动拉起 `autostart: true` 且未暂停、未禁用的程序。
 
 Release 手动安装请下载 `pm-<os>-<arch>.tar.gz`，归档内的 `pm` 已带 `0755` 权限。下载后直接解压即可运行，不需要额外执行 `chmod +x`（同名裸文件仅为兼容旧版 updater 保留）：
 
