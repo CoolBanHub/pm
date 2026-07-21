@@ -66,7 +66,7 @@ func TestServerLifecycle(t *testing.T) {
 	if !response.OK {
 		t.Fatal(response.Message)
 	}
-	response = callForTest(t, socket, Request{Action: "shundown"})
+	response = callForTest(t, socket, Request{Action: "shutdown"})
 	if !response.OK {
 		t.Fatal(response.Message)
 	}

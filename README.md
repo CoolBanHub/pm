@@ -92,8 +92,10 @@ CLI 不依赖 HTTP，所有操作都通过 Unix Socket 完成。CLI 会依次使
 ./bin/pm logs -n 100 -f example-worker
 ./bin/pm reload
 ./bin/pm shutdown
-./bin/pm shundown  # shutdown 的兼容别名
+./bin/pm down      # 等价于 pm shutdown
 ```
+
+`pm up` 是 `pm daemon` 的短别名，参数会原样传递，因此 `pm up -d` 等价于 `pm daemon -d`。
 
 `status` 会显示状态、持久化模式、PID、CPU、内存、直接子进程、全部后代进程、Go goroutine、运行时间、启动次数和退出信息。`list` 是更精简的概览，仅显示名称、分组、状态、PID 和运行时间。上述进程操作都接受多个进程名或 `all`。
 

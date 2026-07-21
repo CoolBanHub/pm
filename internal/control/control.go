@@ -152,7 +152,7 @@ func (s *Server) dispatch(request Request) (Response, bool) {
 		return resultMessage("enabled "+targets(request.Names), s.manager.Enable(request.Names)), false
 	case "reload":
 		return s.reload(), false
-	case "shutdown", "shundown":
+	case "shutdown":
 		return Response{OK: true, Message: "daemon is shutting down"}, true
 	default:
 		return Response{OK: false, Message: fmt.Sprintf("unknown action %q", request.Action)}, false

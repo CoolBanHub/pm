@@ -170,7 +170,7 @@ func TestRunWithoutArgumentsPrintsUsageAndSucceeds(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(output, "Usage:") || !strings.Contains(output, "shutdown|shundown") {
+	if !strings.Contains(output, "Usage:") || !strings.Contains(output, "shutdown|down") || !strings.Contains(output, "up [-config FILE] [-d]") {
 		t.Fatalf("pm without arguments did not print usage: %q", output)
 	}
 }

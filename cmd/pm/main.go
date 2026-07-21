@@ -67,7 +67,7 @@ func run(args []string) error {
 	command := args[0]
 	args = args[1:]
 	switch command {
-	case "daemon":
+	case "daemon", "up":
 		return daemonCommand(args)
 	case "systemd":
 		return systemdCommand(args)
@@ -77,13 +77,16 @@ func run(args []string) error {
 			return err
 		}
 		return controlCommand(resolvedSocket, command, args)
-	case "reload", "shutdown", "shundown":
+	case "reload", "shutdown", "down":
 		if len(args) != 0 {
 			return fmt.Errorf("%s does not accept arguments", command)
 		}
 		resolvedSocket, err := resolveControlSocket(*socket)
 		if err != nil {
 			return err
+		}
+		if command == "down" {
+			command = "shutdown"
 		}
 		return controlCommand(resolvedSocket, command, nil)
 	case "list":
@@ -350,7 +353,7 @@ func webReady(cfg config.Web) bool {
 }
 
 func controlCommand(socket, action string, names []string) error {
-	if len(names) == 0 && action != "status" && action != "reload" && action != "shutdown" && action != "shundown" {
+	if len(names) == 0 && action != "status" && action != "reload" && action != "shutdown" {
 		return fmt.Errorf("%s requires a program name or all", action)
 	}
 	response, err := control.Call(socket, control.Request{Action: action, Names: names})
@@ -564,12 +567,13 @@ func valueOrDash(value string) string {
 func usage(writer io.Writer) {
 	fmt.Fprintln(writer, `Usage:
   pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
+  pm [-socket PATH] up [-config FILE] [-d] [-log FILE]
   pm systemd [-config FILE]
   pm [-socket PATH] status [NAME...]
   pm [-socket PATH] list [NAME...]
   pm [-socket PATH] start|stop|restart NAME|all
   pm [-socket PATH] pause|resume|disable|enable NAME|all
-  pm [-socket PATH] reload|shutdown|shundown
+  pm [-socket PATH] reload|shutdown|down
   pm [-socket PATH] logs [-n LINES] [-f] [-stderr] NAME
   pm llms.txt
   pm version | pm -v

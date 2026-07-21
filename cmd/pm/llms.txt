@@ -40,6 +40,7 @@ directory takes priority over `~/.pm/pm.yaml` when `-config` is omitted.
 
 ```
 pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
+pm [-socket PATH] up [-config FILE] [-d] [-log FILE]  # alias for daemon
 pm systemd [-config FILE]                    # Linux system service installation (run with sudo)
 pm [-socket PATH] status [NAME...]        # full details for all or named programs
 pm [-socket PATH] list   [NAME...]        # compact overview: NAME GROUP STATE PID UPTIME
@@ -47,7 +48,7 @@ pm [-socket PATH] start|stop|restart NAME|all
 pm [-socket PATH] pause|resume|disable|enable NAME|all
 pm [-socket PATH] reload                  # hot-reload program config from disk
 pm [-socket PATH] shutdown                # stop the daemon (and all managed programs)
-pm [-socket PATH] shundown                # compatibility alias for shutdown
+pm [-socket PATH] down                    # alias for shutdown
 pm [-socket PATH] logs [-n LINES] [-f] [-stderr] NAME
 pm llms.txt                               # print this guide
 pm version
