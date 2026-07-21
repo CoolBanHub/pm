@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -95,6 +97,77 @@ func TestSelfUpdaterDownloadsVerifiesAndReplaces(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "updated pm from v1.0.0 to v2.0.0") {
 		t.Fatalf("output = %q", output.String())
+	}
+}
+
+func TestSelfUpdaterPrefersExecutableArchive(t *testing.T) {
+	binary := []byte("archived-pm-binary")
+	archive := updateArchive(t, "pm", 0o755, binary)
+	digest := sha256.Sum256(archive)
+	archiveRequests := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/latest":
+			_ = json.NewEncoder(writer).Encode(githubRelease{TagName: "v2.0.0", Assets: []releaseAsset{
+				{Name: "pm-darwin-arm64.tar.gz", BrowserDownloadURL: server.URL + "/archive", Size: int64(len(archive)), Digest: "sha256:" + hex.EncodeToString(digest[:])},
+				{Name: "pm-darwin-arm64", BrowserDownloadURL: server.URL + "/legacy", Size: int64(len(binary))},
+			}})
+		case "/archive":
+			archiveRequests++
+			_, _ = writer.Write(archive)
+		case "/legacy":
+			t.Error("legacy binary was downloaded despite archive availability")
+			http.Error(writer, "unexpected legacy request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	target := filepath.Join(t.TempDir(), "pm")
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := (selfUpdater{
+		client: server.Client(), latestURL: server.URL + "/latest", currentVersion: "v1.0.0",
+		goos: "darwin", goarch: "arm64", executable: target, output: io.Discard,
+		validate: func(path, expectedVersion string) error {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(data, binary) || expectedVersion != "v2.0.0" {
+				return errors.New("unexpected extracted update")
+			}
+			return nil
+		},
+	}).run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(target)
+	if !updated || archiveRequests != 1 || !bytes.Equal(data, binary) {
+		t.Fatalf("updated=%v archive requests=%d data=%q", updated, archiveRequests, data)
+	}
+}
+
+func TestExtractUpdateArchiveRequiresSafeExecutable(t *testing.T) {
+	for name, archive := range map[string][]byte{
+		"path traversal": updateArchive(t, "../pm", 0o755, []byte("binary")),
+		"not executable": updateArchive(t, "pm", 0o644, []byte("binary")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			archivePath := filepath.Join(t.TempDir(), "pm.tar.gz")
+			if err := os.WriteFile(archivePath, archive, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			destination, err := os.CreateTemp(t.TempDir(), "pm")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer destination.Close()
+			if err := extractUpdateArchive(archivePath, destination); err == nil {
+				t.Fatal("expected unsafe archive rejection")
+			}
+		})
 	}
 }
 
@@ -255,4 +328,24 @@ func updateTestServer(t *testing.T, tag string, binary []byte, checksums string)
 func checksumLine(data []byte, name string) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]) + "  " + name + "\n"
+}
+
+func updateArchive(t *testing.T, name string, mode int64, data []byte) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	compressed := gzip.NewWriter(&buffer)
+	archive := tar.NewWriter(compressed)
+	if err := archive.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
 }

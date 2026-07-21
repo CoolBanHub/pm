@@ -47,14 +47,22 @@ jobs:
             goos="$1"
             goarch="$2"
             output="dist/pm-${goos}-${goarch}"
+            archive="dist/pm-${goos}-${goarch}.tar.gz"
+            staging="$(mktemp -d)"
 
-            echo "Building ${output}"
+            echo "Building ${archive}"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
               go build \
                 -trimpath \
                 -ldflags="-s -w -X main.version=${VERSION}" \
                 -o "$output" \
                 ./cmd/pm
+            # Keep the raw asset while v0.0.2 clients still require it.
+            chmod 0755 "$output"
+            cp "$output" "$staging/pm"
+            chmod 0755 "$staging/pm"
+            tar -C "$staging" -czf "$archive" pm
+            rm -rf "$staging"
           }
 
           build darwin amd64

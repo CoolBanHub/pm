@@ -85,6 +85,13 @@ PM 会先比较当前版本和最新 Release tag；版本一致时直接退出�
 
 更新只替换二进制文件，不会中断正在运行的 daemon。使用 systemd 时执行 `sudo systemctl restart pm`，使用 `pm up -d` 时执行 `pm down` 后重新 `pm up -d`，即可让常驻进程运行新版本。
 
+Release 手动安装请下载 `pm-<os>-<arch>.tar.gz`，归档内的 `pm` 已带 `0755` 权限。下载后直接解压即可运行，不需要额外执行 `chmod +x`（同名裸文件仅为兼容旧版 updater 保留）：
+
+```bash
+tar -xzf pm-linux-amd64.tar.gz
+./pm version
+```
+
 示例配置的管理后台地址为 [http://127.0.0.1:19090](http://127.0.0.1:19090)。后台模式下，守护进程日志写入 `~/.pm/logs/pm-daemon.log`（或配置目录下的 `logs/pm-daemon.log`）。
 
 ## 命令行控制

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -99,10 +101,16 @@ func (u selfUpdater) run(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	assetName := fmt.Sprintf("pm-%s-%s", u.goos, u.goarch)
+	assetBaseName := fmt.Sprintf("pm-%s-%s", u.goos, u.goarch)
+	assetName := assetBaseName + ".tar.gz"
 	binaryAsset, found := findReleaseAsset(release.Assets, assetName)
+	archived := found
 	if !found {
-		return false, fmt.Errorf("release %s does not provide %s", release.TagName, assetName)
+		assetName = assetBaseName
+		binaryAsset, found = findReleaseAsset(release.Assets, assetName)
+	}
+	if !found {
+		return false, fmt.Errorf("release %s does not provide %s.tar.gz or the legacy %s", release.TagName, assetBaseName, assetBaseName)
 	}
 	expectedChecksum, hasDigest, err := checksumFromDigest(binaryAsset.Digest)
 	if err != nil {
@@ -122,7 +130,7 @@ func (u selfUpdater) run(ctx context.Context) (bool, error) {
 			return false, err
 		}
 	}
-	if err := u.replaceExecutable(ctx, binaryAsset.BrowserDownloadURL, binaryAsset.Size, expectedChecksum, release.TagName); err != nil {
+	if err := u.replaceExecutable(ctx, binaryAsset.BrowserDownloadURL, binaryAsset.Size, expectedChecksum, release.TagName, archived); err != nil {
 		return false, err
 	}
 	fmt.Fprintf(u.output, "updated pm from %s to %s\n", u.currentVersion, release.TagName)
@@ -224,7 +232,7 @@ func (u selfUpdater) fetchOnce(ctx context.Context, url string, maximum int64) (
 	return data, nil
 }
 
-func (u selfUpdater) replaceExecutable(ctx context.Context, url string, expectedSize int64, expected [sha256.Size]byte, expectedVersion string) error {
+func (u selfUpdater) replaceExecutable(ctx context.Context, url string, expectedSize int64, expected [sha256.Size]byte, expectedVersion string, archived bool) error {
 	info, err := os.Stat(u.executable)
 	if err != nil {
 		return fmt.Errorf("inspect current executable: %w", err)
@@ -250,28 +258,99 @@ func (u selfUpdater) replaceExecutable(ctx context.Context, url string, expected
 		return fmt.Errorf("close update: %w", err)
 	}
 	if !equalChecksum(actual, expected[:]) {
-		return errors.New("downloaded binary checksum does not match SHA256SUMS")
+		return errors.New("downloaded release asset does not match its SHA-256 checksum")
+	}
+	candidatePath := temporaryPath
+	if archived {
+		candidate, err := os.CreateTemp(directory, ".pm-extracted-*")
+		if err != nil {
+			return fmt.Errorf("create extracted update beside %s: %w", u.executable, err)
+		}
+		candidatePath = candidate.Name()
+		defer os.Remove(candidatePath)
+		if err := extractUpdateArchive(temporaryPath, candidate); err != nil {
+			candidate.Close()
+			return fmt.Errorf("extract update: %w", err)
+		}
+		if err := candidate.Sync(); err != nil {
+			candidate.Close()
+			return fmt.Errorf("sync extracted update: %w", err)
+		}
+		if err := candidate.Close(); err != nil {
+			return fmt.Errorf("close extracted update: %w", err)
+		}
 	}
 	mode := info.Mode().Perm()
 	if mode&0o111 == 0 {
 		mode = 0o755
 	}
-	if err := os.Chmod(temporaryPath, mode); err != nil {
+	if err := os.Chmod(candidatePath, mode); err != nil {
 		return fmt.Errorf("make update executable: %w", err)
 	}
 	validate := u.validate
 	if validate == nil {
 		validate = validateDownloadedBinary
 	}
-	if err := validate(temporaryPath, expectedVersion); err != nil {
+	if err := validate(candidatePath, expectedVersion); err != nil {
 		return fmt.Errorf("validate update: %w", err)
 	}
-	if err := os.Rename(temporaryPath, u.executable); err != nil {
+	if err := os.Rename(candidatePath, u.executable); err != nil {
 		return fmt.Errorf("replace %s: %w; rerun with sufficient permissions (for example sudo pm update)", u.executable, err)
 	}
 	if handle, openErr := os.Open(directory); openErr == nil {
 		_ = handle.Sync()
 		_ = handle.Close()
+	}
+	return nil
+}
+
+func extractUpdateArchive(archivePath string, destination *os.File) error {
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer archiveFile.Close()
+	compressed, err := gzip.NewReader(archiveFile)
+	if err != nil {
+		return fmt.Errorf("open gzip stream: %w", err)
+	}
+	defer compressed.Close()
+	reader := tar.NewReader(compressed)
+	found := false
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read tar archive: %w", err)
+		}
+		if header.Name != "pm" && header.Name != "./pm" {
+			return fmt.Errorf("archive contains unexpected entry %q", header.Name)
+		}
+		if found {
+			return errors.New("archive contains duplicate pm entries")
+		}
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			return errors.New("archive pm entry is not a regular file")
+		}
+		if header.Size < 0 || header.Size > maximumBinary {
+			return fmt.Errorf("archive pm entry exceeds %d bytes", maximumBinary)
+		}
+		if header.Mode&0o111 == 0 {
+			return errors.New("archive pm entry is not executable")
+		}
+		written, err := io.Copy(destination, io.LimitReader(reader, maximumBinary+1))
+		if err != nil {
+			return fmt.Errorf("extract pm: %w", err)
+		}
+		if written != header.Size {
+			return fmt.Errorf("extracted pm size is %d, expected %d", written, header.Size)
+		}
+		found = true
+	}
+	if !found {
+		return errors.New("archive does not contain pm")
 	}
 	return nil
 }

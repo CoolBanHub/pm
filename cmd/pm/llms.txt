@@ -72,10 +72,12 @@ user's `~/.pm/pm.yaml`. Pass `-config FILE` to choose another file.
 
 `pm update` queries the latest stable GitHub Release. If its tag equals the
 compiled-in current version, no files are downloaded. Otherwise PM downloads
-the matching `pm-<os>-<arch>` asset, verifies its GitHub SHA-256 digest (falling
-back to `SHA256SUMS` for older releases) and the downloaded binary's reported
-version, then atomically replaces the current executable. Use `sudo pm update`
-when it is installed in a root-owned directory.
+the matching `pm-<os>-<arch>.tar.gz` asset, verifies its GitHub SHA-256 digest
+(falling back to `SHA256SUMS` and legacy raw assets for older releases), safely
+extracts the executable, checks its reported version, then atomically replaces
+the current executable. Use `sudo pm update` when it is installed in a
+root-owned directory. Manually downloaded archives contain `pm` with mode
+`0755`, so `tar -xzf pm-<os>-<arch>.tar.gz` needs no subsequent `chmod`.
 A running daemon keeps the old code until it is restarted.
 
 CLI socket resolution order: `-socket PATH` flag → `PM_SOCKET` env → `socket`
