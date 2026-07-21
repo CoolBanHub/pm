@@ -2,10 +2,12 @@ package config
 
 import (
 	"bytes"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,9 +17,36 @@ import (
 )
 
 const (
-	DefaultFile   = "pm.yaml"
-	DefaultSocket = "/tmp/pm.sock"
+	DefaultFile = "pm.yaml"
 )
+
+// defaultConfigTemplate is written to ~/.pm/pm.yaml on first run so the
+// default configuration is visible and editable. See SeedDefaultConfig.
+//
+//go:embed default_config.yaml
+var defaultConfigTemplate []byte
+
+// HomeDir returns PM's default data directory (~/.pm). All default config,
+// logs, state, and the control socket live beneath it. It falls back to a
+// relative ".pm" when the user home cannot be determined.
+func HomeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ".pm"
+	}
+	return filepath.Join(home, ".pm")
+}
+
+// DefaultConfigPath returns the default configuration file path (~/.pm/pm.yaml).
+func DefaultConfigPath() string {
+	return filepath.Join(HomeDir(), DefaultFile)
+}
+
+// DefaultSocketPath returns the default control socket path (~/.pm/pm.sock),
+// used as an absolute fallback when no configuration can be loaded.
+func DefaultSocketPath() string {
+	return filepath.Join(HomeDir(), "pm.sock")
+}
 
 type Config struct {
 	Socket       string    `json:"socket" yaml:"socket"`
@@ -52,6 +81,7 @@ type Program struct {
 	StderrLog     string            `json:"stderr_log,omitempty" yaml:"stderr_log,omitempty"`
 	LogMaxBytes   int64             `json:"log_max_bytes" yaml:"log_max_bytes"`
 	LogBackups    int               `json:"log_backups" yaml:"log_backups"`
+	PprofURL      string            `json:"pprof_url,omitempty" yaml:"pprof_url,omitempty"`
 }
 
 func Load(path string) (Config, error) {
@@ -73,10 +103,29 @@ func LoadOrDefault(path string) (Config, error) {
 	return Config{}, err
 }
 
+// SeedDefaultConfig writes the default configuration template to path when it
+// does not yet exist, creating the parent directory. It makes the default
+// configuration under ~/.pm tangible and editable on first run. If the file
+// already exists it is left untouched.
+func SeedDefaultConfig(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, defaultConfigTemplate, 0o644)
+}
+
+// DefaultConfig returns built-in defaults. Socket and StateDir are relative so
+// they resolve against the configuration file's directory (~/.pm by default),
+// keeping all default data in one place.
 func DefaultConfig() Config {
 	return Config{
-		Socket:       DefaultSocket,
-		StateDir:     ".pm",
+		Socket:       "pm.sock",
+		StateDir:     ".",
 		EventHistory: 1000,
 		Web: Web{
 			Enabled: true,
@@ -223,6 +272,12 @@ func (c Config) Validate() error {
 		}
 		if p.LogBackups < 0 {
 			return fmt.Errorf("%s.log_backups cannot be negative", prefix)
+		}
+		if p.PprofURL != "" {
+			parsed, err := url.ParseRequestURI(p.PprofURL)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+				return fmt.Errorf("%s.pprof_url must be an HTTP(S) pprof base URL without query or fragment", prefix)
+			}
 		}
 		switch strings.ToUpper(p.StopSignal) {
 		case "TERM", "INT", "QUIT", "HUP":

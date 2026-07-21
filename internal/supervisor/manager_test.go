@@ -83,6 +83,7 @@ func TestManagerApplyOnlyRestartsChangedProcesses(t *testing.T) {
 	pids := map[string]int{before[0].Name: before[0].PID, before[1].Name: before[1].PID}
 
 	first.Group = "critical"
+	first.PprofURL = "http://127.0.0.1:6060/debug/pprof"
 	third := testProgram("third", "sleep 30")
 	third.Group = "jobs"
 	third.Autostart = false
@@ -96,7 +97,7 @@ func TestManagerApplyOnlyRestartsChangedProcesses(t *testing.T) {
 	for _, status := range after {
 		switch status.Name {
 		case "first":
-			if status.PID != pids["first"] || status.Group != "critical" {
+			if status.PID != pids["first"] || status.Group != "critical" || status.PprofURL != first.PprofURL {
 				t.Fatalf("metadata update restarted first: %+v", status)
 			}
 		case "second":

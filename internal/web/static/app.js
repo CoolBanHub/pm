@@ -162,6 +162,8 @@ function sortProcesses(list) {
       case 'state': va = STATE_ORDER[a.state] ?? 9; vb = STATE_ORDER[b.state] ?? 9; break;
       case 'cpu': va = a.cpu_percent || 0; vb = b.cpu_percent || 0; break;
       case 'memory': va = a.memory_bytes || 0; vb = b.memory_bytes || 0; break;
+      case 'children': va = a.child_processes || 0; vb = b.child_processes || 0; break;
+      case 'goroutines': va = a.goroutines ?? -1; vb = b.goroutines ?? -1; break;
       case 'pid': va = a.pid || 0; vb = b.pid || 0; break;
       case 'restarts': va = a.restarts || 0; vb = b.restarts || 0; break;
       case 'uptime': va = processAgeSec(a); vb = processAgeSec(b); break;
@@ -198,6 +200,8 @@ function rowMarkup(process, animate) {
     <td class="num-col cell-pid"><span class="metric">${process.pid || '-'}</span></td>
     <td class="num-col cell-cpu"><span class="metric">${process.pid ? `${(process.cpu_percent || 0).toFixed(1)}%` : '-'}</span></td>
     <td class="num-col cell-mem"><span class="metric">${process.pid ? formatBytes(process.memory_bytes || 0) : '-'}</span></td>
+    <td class="num-col cell-children"><span class="metric">${process.pid ? (process.child_processes || 0) : '-'}</span></td>
+    <td class="num-col cell-goroutines"><span class="metric">${process.pid && Number.isInteger(process.goroutines) ? process.goroutines : '-'}</span></td>
     <td class="num-col cell-up">${escapeHTML(process.uptime || '-')}</td>
     <td class="num-col cell-restarts">${process.restarts || 0}</td>
     <td><div class="row-actions">${actionButtons(process)}</div></td>
@@ -207,7 +211,7 @@ function renderSkeleton() {
   $('#process-count').textContent = '加载中…';
   $('#empty-state').classList.add('hidden');
   $('#process-list').innerHTML = Array.from({ length: 6 }).map(() =>
-    `<tr class="skeleton-row"><td class="check-column"></td>${Array.from({ length: 8 }).map(() => '<td><span class="skeleton-cell">&nbsp;</span></td>').join('')}</tr>`
+    `<tr class="skeleton-row"><td class="check-column"></td>${Array.from({ length: 11 }).map(() => '<td><span class="skeleton-cell">&nbsp;</span></td>').join('')}</tr>`
   ).join('');
 }
 function renderProcesses() {
@@ -241,6 +245,8 @@ function updateRowsInPlace(processes) {
     setHTML('.cell-pid', `<span class="metric">${p.pid || '-'}</span>`);
     setHTML('.cell-cpu', `<span class="metric">${p.pid ? `${(p.cpu_percent || 0).toFixed(1)}%` : '-'}</span>`);
     setHTML('.cell-mem', `<span class="metric">${p.pid ? formatBytes(p.memory_bytes || 0) : '-'}</span>`);
+    setHTML('.cell-children', `<span class="metric">${p.pid ? (p.child_processes || 0) : '-'}</span>`);
+    setHTML('.cell-goroutines', `<span class="metric">${p.pid && Number.isInteger(p.goroutines) ? p.goroutines : '-'}</span>`);
     const up = row.querySelector('.cell-up'); if (up) up.textContent = p.uptime || '-';
     const rs = row.querySelector('.cell-restarts'); if (rs) rs.textContent = String(p.restarts || 0);
   }
@@ -364,6 +370,7 @@ function renderDrawer() {
   $('#drawer-title').textContent = p.name; $('#drawer-state').outerHTML = statusBadge(p.state, 'drawer-state');
   $('#tab-overview').innerHTML = `<div class="detail-grid">
     ${detail('状态', p.state)}${detail('所属分组', p.group || 'default')}${detail('PID', p.pid || '-')}${detail('CPU', p.pid ? `${(p.cpu_percent || 0).toFixed(1)}%` : '-')}${detail('内存', p.pid ? formatBytes(p.memory_bytes || 0) : '-')}
+    ${detail('直接子进程', p.pid ? (p.child_processes || 0) : '-')}${detail('全部后代进程', p.pid ? (p.descendant_processes || 0) : '-')}${detail('Go 协程', p.pid && Number.isInteger(p.goroutines) ? p.goroutines : '-')}
     ${detail('运行时间', p.uptime || '-')}${detail('启动次数', p.starts)}${detail('重启次数', p.restarts)}${detail('重启策略', p.restart_policy)}
     ${detail('命令', commandText(p), true)}${detail('工作目录', p.directory || '-', true)}${detail('标准输出', p.stdout_log || '未配置', true)}${detail('标准错误', p.stderr_log || '未配置', true)}
     ${p.last_error ? detail('最近错误', p.last_error, true) : ''}</div>`;
@@ -475,6 +482,7 @@ function fillProcessForm(program) {
   $('#process-stop-timeout').value = program.stop_timeout || '10s';
   $('#process-stdout').value = program.stdout_log || '';
   $('#process-stderr').value = program.stderr_log || '';
+  $('#process-pprof-url').value = program.pprof_url || '';
   $('#process-log-size').value = Math.round((program.log_max_bytes || 0) / 1048576);
   $('#process-log-backups').value = program.log_backups ?? 3;
 }
@@ -495,6 +503,7 @@ function processFormValue() {
     max_restarts: Number($('#process-max-restarts').value), restart_window: $('#process-restart-window').value.trim(),
     stop_signal: $('#process-stop-signal').value, stop_timeout: $('#process-stop-timeout').value.trim(),
     stdout_log: $('#process-stdout').value.trim(), stderr_log: $('#process-stderr').value.trim(),
+    pprof_url: $('#process-pprof-url').value.trim(),
     log_max_bytes: Math.round(Number($('#process-log-size').value) * 1048576), log_backups: Number($('#process-log-backups').value),
   };
 }

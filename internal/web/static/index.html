@@ -126,6 +126,8 @@
                 <th data-sort="pid" class="num-col"><span>PID</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="cpu" class="num-col"><span>CPU</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="memory" class="num-col"><span>内存</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="children" class="num-col"><span>子进程</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="goroutines" class="num-col"><span>协程</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="uptime" class="num-col"><span>运行时间</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="restarts" class="num-col"><span>重启</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th class="actions-column">操作</th>
@@ -204,6 +206,7 @@
         <div class="form-field"><label for="process-stop-timeout">停止超时</label><input id="process-stop-timeout" value="10s" required></div>
         <div class="form-field wide"><label for="process-stdout">标准输出日志</label><input id="process-stdout" placeholder="logs/app.log"></div>
         <div class="form-field wide"><label for="process-stderr">标准错误日志</label><input id="process-stderr" placeholder="logs/app.error.log"></div>
+        <div class="form-field wide"><label for="process-pprof-url">Go pprof 地址</label><input id="process-pprof-url" type="url" placeholder="http://127.0.0.1:6060/debug/pprof"></div>
         <div class="form-field"><label for="process-log-size">日志切割大小（MB）</label><input id="process-log-size" type="number" min="0" step="1" value="10"></div>
         <div class="form-field"><label for="process-log-backups">保留日志数量</label><input id="process-log-backups" type="number" min="0" value="3"></div>
       </div>

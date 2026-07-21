@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +26,7 @@ func TestLoadDaemonConfigUsesDefaultsOnlyWhenOptional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Socket != config.DefaultSocket || !cfg.Web.Enabled || len(cfg.Programs) != 0 {
+	if cfg.Socket != "pm.sock" || !cfg.Web.Enabled || len(cfg.Programs) != 0 {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 	if _, err := loadDaemonConfig(path, false); !errors.Is(err, os.ErrNotExist) {
@@ -56,7 +57,7 @@ func TestResolveControlSocketPriorityAndCurrentConfig(t *testing.T) {
 		t.Fatalf("socket from flag = %q, err = %v", fromFlag, err)
 	}
 	fallback, err := resolveControlSocketAt("", "", filepath.Join(dir, "missing.yaml"))
-	if err != nil || fallback != config.DefaultSocket {
+	if err != nil || fallback != config.DefaultSocketPath() {
 		t.Fatalf("fallback socket = %q, err = %v", fallback, err)
 	}
 }
@@ -102,5 +103,53 @@ func TestReadLastLinesWithoutTrailingNewline(t *testing.T) {
 	}
 	if string(got) != "three" {
 		t.Fatalf("tail = %q", got)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what
+// it wrote. Synchronous writers (fmt.Println/usage) fit the pipe buffer.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	fn()
+	writer.Close()
+	os.Stdout = old
+	var buffer bytes.Buffer
+	if _, err := io.Copy(&buffer, reader); err != nil {
+		t.Fatal(err)
+	}
+	reader.Close()
+	return buffer.String()
+}
+
+func TestRunVersionFlagPrintsInjectedVersion(t *testing.T) {
+	saved := version
+	version = "test-1.2.3"
+	defer func() { version = saved }()
+	output := captureStdout(t, func() {
+		if err := run([]string{"-v"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.TrimSpace(output) != "test-1.2.3" {
+		t.Fatalf("-v output = %q", output)
+	}
+}
+
+func TestRunHelpFlagsPrintUsage(t *testing.T) {
+	for _, flag := range []string{"-h", "--help", "help"} {
+		output := captureStdout(t, func() {
+			if err := run([]string{flag}); err != nil {
+				t.Fatalf("%s: %v", flag, err)
+			}
+		})
+		if !strings.Contains(output, "Usage:") || !strings.Contains(output, "pm version | pm -v") {
+			t.Fatalf("%s did not print usage: %q", flag, output)
+		}
 	}
 }

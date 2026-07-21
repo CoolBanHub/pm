@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -47,7 +48,7 @@ func TestLoadOrDefaultAllowsMissingAndEmptyConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Socket != DefaultSocket || cfg.StateDir != ".pm" || !cfg.Web.Enabled || cfg.Web.Listen != "127.0.0.1:19090" || len(cfg.Programs) != 0 {
+	if cfg.Socket != "pm.sock" || cfg.StateDir != "." || !cfg.Web.Enabled || cfg.Web.Listen != "127.0.0.1:19090" || len(cfg.Programs) != 0 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 
@@ -96,5 +97,44 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected unknown field error")
+	}
+}
+
+func TestPprofURLValidation(t *testing.T) {
+	valid := []byte("programs:\n  - name: api\n    command: app\n    pprof_url: http://127.0.0.1:6060/debug/pprof\n")
+	if _, err := Parse(valid); err != nil {
+		t.Fatalf("valid pprof_url: %v", err)
+	}
+	invalid := []byte("programs:\n  - name: api\n    command: app\n    pprof_url: file:///tmp/profile\n")
+	if _, err := Parse(invalid); err == nil {
+		t.Fatal("expected invalid pprof_url error")
+	}
+}
+
+func TestSeedDefaultConfigCreatesFileAndDoesNotOverwrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested")
+	path := filepath.Join(dir, "pm.yaml")
+
+	if err := SeedDefaultConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	created, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected seeded file: %v", err)
+	}
+	if _, err := Parse(created); err != nil {
+		t.Fatalf("seeded config must parse: %v", err)
+	}
+
+	// A user edit must be preserved on a subsequent call.
+	userEdit := []byte("socket: custom.sock\n")
+	if err := os.WriteFile(path, userEdit, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedDefaultConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, userEdit) {
+		t.Fatalf("seed overwrote existing file: %s", got)
 	}
 }

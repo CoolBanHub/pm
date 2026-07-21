@@ -1,0 +1,194 @@
+# PM
+
+> PM is a single-binary process manager for macOS/Linux. It runs a resident
+> daemon, exposes a Unix-socket control API and an optional local web console,
+> and keeps all default data under `~/.pm`. This file is the complete, offline
+> guide an AI agent needs to use and configure PM. Run `pm llms.txt` to print it.
+
+PM does not depend on a database, Node.js, or an external web server. The web
+console's static assets are embedded in the binary. No telemetry is collected.
+
+## Quick start
+
+```bash
+make install            # or: go install ./cmd/pm   (needs Go 1.26+)
+pm daemon -d            # start the daemon in the background (or run under launchd/systemd)
+pm list                 # compact list of managed processes
+pm status               # detailed table (CPU, memory, uptime, restarts, exit)
+```
+
+On the first run, PM creates `~/.pm/` and writes a default, editable config to
+`~/.pm/pm.yaml`. With the default config the web console is enabled at
+http://127.0.0.1:19090 (token optional while listening on loopback).
+
+All default data lives under `~/.pm`:
+
+| Path | Purpose |
+| --- | --- |
+| `~/.pm/pm.yaml` | configuration (auto-generated on first run) |
+| `~/.pm/pm.sock` | Unix control socket |
+| `~/.pm/events.jsonl` | lifecycle event history |
+| `~/.pm/logs/pm-daemon.log` | daemon log when started with `-d` |
+| `~/.pm/logs/<name>.log` | a managed process' stdout/stderr (when configured) |
+
+To override the config location, pass `-config FILE`. A `pm.yaml` in the current
+directory takes priority over `~/.pm/pm.yaml` when `-config` is omitted.
+
+## Commands
+
+```
+pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
+pm [-socket PATH] status [NAME...]        # full details for all or named programs
+pm [-socket PATH] list   [NAME...]        # compact overview: NAME GROUP STATE PID UPTIME
+pm [-socket PATH] start|stop|restart NAME|all
+pm [-socket PATH] reload                  # hot-reload program config from disk
+pm [-socket PATH] shutdown                # stop the daemon (and all managed programs)
+pm [-socket PATH] logs [-n LINES] [-f] [-stderr] NAME
+pm llms.txt                               # print this guide
+pm version
+```
+
+`status` shows full detail (state, PID, CPU, memory, child/descendant process
+counts, Go goroutines when configured, uptime, start count, exit code, last
+error). `list` is a 5-column quick overview. `start`, `stop`,
+`restart` accept several names or the literal `all`.
+
+CLI socket resolution order: `-socket PATH` flag → `PM_SOCKET` env → `socket`
+field from the config → `~/.pm/pm.sock`.
+
+## Configuration
+
+Config is YAML. Relative paths resolve against the config file's directory
+(`~/.pm` by default). Unknown fields are rejected. Strict validation runs on
+load and on web edits; the daemon refuses to start on invalid config.
+
+### Daemon fields
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `socket` | CLI control socket | `pm.sock` (→ `~/.pm/pm.sock`) |
+| `state_dir` | runtime state dir (events) | `.` (→ `~/.pm`) |
+| `event_history` | events kept in memory; `0` disables | `1000` |
+| `web.enabled` | enable the HTTP console | `true` |
+| `web.listen` | HTTP listen address | `127.0.0.1:19090` |
+| `web.token` | access token, literal | empty |
+| `web.token_env` | env var name holding the token (preferred) | empty |
+
+### Program fields
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `name` | unique program name; no whitespace | required |
+| `group` | grouping for filtering | `default` |
+| `command` | executable; NOT parsed by a shell | required |
+| `args` | argument list | `[]` |
+| `directory` | working directory | daemon's cwd |
+| `environment` | env vars to add/override | `{}` |
+| `autostart` | start when the daemon starts | `true` |
+| `restart` | `never` / `unexpected` / `always` | `unexpected` |
+| `restart_delay` | wait before auto-restart | `1s` |
+| `max_restarts` | max restarts in the window; `0` = unlimited | `5` |
+| `restart_window` | restart-count window | `1m` |
+| `stop_signal` | `TERM` / `INT` / `QUIT` / `HUP` | `TERM` |
+| `stop_timeout` | grace period before force-killing the tree | `10s` |
+| `stdout_log` | stdout log path | inherits daemon output |
+| `stderr_log` | stderr log path (may equal stdout_log) | inherits daemon output |
+| `log_max_bytes` | per-file rotation threshold; `0` = no rotation | `10485760` |
+| `log_backups` | rotated backups to keep | `3` |
+| `pprof_url` | Go pprof base URL for goroutine count | empty (disabled) |
+
+Child and descendant counts are collected automatically from OS process
+relationships. For a Go program, expose `net/http/pprof` on a loopback-only
+listener and set, for example,
+`pprof_url: http://127.0.0.1:6060/debug/pprof`. PM reads the goroutine profile
+with a 750ms timeout. Do not expose pprof directly to the public internet.
+
+Restart semantics: `unexpected` restarts only on non-zero exit; `always`
+restarts on any exit; `never` does not. Too many restarts within
+`restart_window` push the program into `FATAL`. `command` is not shell-parsed —
+for pipes/redirection/loops use `command: /bin/sh` and `args: ["-c", "..."]`.
+
+### Example
+
+```yaml
+socket: pm.sock
+state_dir: .
+event_history: 1000
+
+web:
+  enabled: true
+  listen: 127.0.0.1:19090
+
+programs:
+  - name: example-worker
+    group: workers
+    command: /bin/sh
+    args: ["-c", 'while true; do echo "tick $(date)"; sleep 5; done']
+    directory: "."
+    environment:
+      APP_ENV: local
+    autostart: true
+    restart: unexpected
+    restart_delay: 1s
+    max_restarts: 5
+    restart_window: 1m
+    stop_signal: TERM
+    stop_timeout: 10s
+    stdout_log: logs/example-worker.log
+    stderr_log: logs/example-worker.error.log
+    pprof_url: http://127.0.0.1:6060/debug/pprof
+    log_max_bytes: 10485760
+    log_backups: 3
+```
+
+## Web security
+
+Set `web.enabled: false` to disable HTTP entirely; the Unix-socket CLI is
+unaffected. The default listener is loopback only, where a token is optional.
+Listening beyond loopback (`0.0.0.0`, etc.) REQUIRES `token` or `token_env` or
+the daemon refuses to start. Prefer injecting the token via an env var:
+
+```yaml
+web:
+  enabled: true
+  listen: 0.0.0.0:19090
+  token_env: PM_WEB_TOKEN
+```
+```bash
+export PM_WEB_TOKEN="$(openssl rand -hex 24)"
+```
+
+Tokens travel in cleartext over HTTP on a LAN — put HTTPS (reverse proxy) or an
+SSH tunnel in front for cross-machine access: `ssh -L 19090:127.0.0.1:19090 user@host`.
+
+## reload vs restart
+
+`pm reload` re-reads `~/.pm/pm.yaml` and applies a DIFFERENTIAL update: unchanged
+programs keep their PID; only added/removed/changed programs are affected, and
+merely changing a `group` does not restart a program. Changes to `socket`,
+`web`, `state_dir`, or `event_history` are NOT hot-applicable and require a
+daemon restart (`pm shutdown` then `pm daemon`).
+
+The web console edits config safely: it writes `<config>.bak`, then atomically
+replaces the config via a temp file in the same directory.
+
+## Common tasks for agents
+
+- Add a process: append a program entry to `~/.pm/pm.yaml`, then `pm reload`.
+  To manage it without reloading other programs, the differential reload keeps
+  existing PIDs stable.
+- Tail logs: `pm logs -f -n 200 NAME` (stdout); add `-stderr` for stderr.
+- Check health: `pm list` for a fast scan, `pm status NAME` for detail.
+- Stop everything: `pm stop all`. Stop the daemon: `pm shutdown`.
+- Diagnose a `FATAL` program: `pm status NAME` shows restart count and last
+  error; review `~/.pm/logs/<name>.log` and `~/.pm/logs/pm-daemon.log`.
+- Move data: edit `~/.pm/pm.yaml` paths, or run with `-config` pointing
+  elsewhere; remember `socket`/`state_dir`/`web`/`event_history` changes need a
+  daemon restart, not just `reload`.
+
+## Notes
+
+- Stateful data is plain files under `~/.pm`; back up or inspect directly.
+- Long-running deployments should use launchd (macOS) or systemd (Linux), not
+  `-d`. See `deploy/` for templates. When managed by the OS, do not pass `-d`.
+- `pm llms.txt` works offline and needs no running daemon.

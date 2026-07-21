@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,6 +29,12 @@ import (
 
 var version = "dev"
 
+// llmsText is the AI-readable usage/configuration guide printed by
+// `pm llms.txt`. It works offline and needs no running daemon.
+//
+//go:embed llms.txt
+var llmsText string
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "pm:", err)
@@ -39,8 +46,17 @@ func run(args []string) error {
 	global := flag.NewFlagSet("pm", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
 	socket := global.String("socket", "", "Unix socket path")
+	showVersion := global.Bool("v", false, "print version and exit")
 	if err := global.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usage(os.Stdout)
+			return nil
+		}
 		return err
+	}
+	if *showVersion {
+		fmt.Println(version)
+		return nil
 	}
 	args = global.Args()
 	if len(args) == 0 {
@@ -68,6 +84,12 @@ func run(args []string) error {
 			return err
 		}
 		return controlCommand(resolvedSocket, command, nil)
+	case "list":
+		resolvedSocket, err := resolveControlSocket(*socket)
+		if err != nil {
+			return err
+		}
+		return listCommand(resolvedSocket, args)
 	case "logs":
 		resolvedSocket, err := resolveControlSocket(*socket)
 		if err != nil {
@@ -77,7 +99,10 @@ func run(args []string) error {
 	case "version":
 		fmt.Println(version)
 		return nil
-	case "help", "-h", "--help":
+	case "llms.txt", "llms":
+		fmt.Print(llmsText)
+		return nil
+	case "help":
 		usage(os.Stdout)
 		return nil
 	default:
@@ -88,7 +113,7 @@ func run(args []string) error {
 
 func daemonCommand(args []string) error {
 	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
-	configPath := flags.String("config", config.DefaultFile, "configuration file")
+	configPath := flags.String("config", defaultConfigPath(), "configuration file")
 	detach := flags.Bool("d", false, "run in the background")
 	legacyDetach := flags.Bool("detach", false, "deprecated alias for -d")
 	child := flags.Bool("child", false, "internal detached child marker")
@@ -105,6 +130,14 @@ func daemonCommand(args []string) error {
 		return err
 	}
 	configExplicit := flagWasSet(flags, "config") && !*optionalConfig
+	if !configExplicit {
+		// First run: materialize ~/.pm/pm.yaml so the default configuration is
+		// visible and editable. Failure is non-fatal; we fall back to built-in
+		// defaults via LoadOrDefault below.
+		if err := config.SeedDefaultConfig(absoluteConfig); err != nil {
+			log.Printf("seed default config: %v", err)
+		}
+	}
 	cfg, err := loadDaemonConfig(absoluteConfig, !configExplicit)
 	if err != nil {
 		return err
@@ -114,6 +147,19 @@ func daemonCommand(args []string) error {
 		return detachDaemon(absoluteConfig, cfg, *daemonLog, !configExplicit)
 	}
 	return serveDaemon(absoluteConfig, cfg)
+}
+
+// defaultConfigPath picks the configuration file used when -config is omitted:
+// a pm.yaml in the current directory wins (backward-compatible project-local
+// usage), otherwise the home default ~/.pm/pm.yaml is used.
+func defaultConfigPath() string {
+	if workingDirectory, err := os.Getwd(); err == nil {
+		candidate := filepath.Join(workingDirectory, config.DefaultFile)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return config.DefaultConfigPath()
 }
 
 func loadDaemonConfig(path string, optional bool) (config.Config, error) {
@@ -134,11 +180,7 @@ func flagWasSet(flags *flag.FlagSet, name string) bool {
 }
 
 func resolveControlSocket(explicit string) (string, error) {
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	return resolveControlSocketAt(explicit, os.Getenv("PM_SOCKET"), filepath.Join(workingDirectory, config.DefaultFile))
+	return resolveControlSocketAt(explicit, os.Getenv("PM_SOCKET"), defaultConfigPath())
 }
 
 func resolveControlSocketAt(explicit, environment, configPath string) (string, error) {
@@ -156,7 +198,7 @@ func resolveControlSocketAt(explicit, environment, configPath string) (string, e
 	if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	return config.DefaultSocket, nil
+	return config.DefaultSocketPath(), nil
 }
 
 func serveDaemon(configPath string, cfg config.Config) error {
@@ -226,7 +268,7 @@ func detachDaemon(configPath string, cfg config.Config, logPath string, optional
 		return fmt.Errorf("daemon is already listening on %s", cfg.Socket)
 	}
 	if logPath == "" {
-		logPath = filepath.Join(filepath.Dir(configPath), "pm-daemon.log")
+		logPath = filepath.Join(filepath.Dir(configPath), "logs", "pm-daemon.log")
 	}
 	if !filepath.IsAbs(logPath) {
 		logPath = filepath.Join(filepath.Dir(configPath), logPath)
@@ -320,15 +362,32 @@ func controlCommand(socket, action string, names []string) error {
 	return nil
 }
 
+func listCommand(socket string, names []string) error {
+	response, err := control.Call(socket, control.Request{Action: "status", Names: names})
+	if err != nil {
+		return err
+	}
+	if !response.OK {
+		return errors.New(response.Message)
+	}
+	printList(response.Processes)
+	return nil
+}
+
 func printStatuses(statuses []supervisor.Status) {
 	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "NAME\tGROUP\tSTATE\tPID\tCPU\tMEMORY\tUPTIME\tSTARTS\tEXIT\tDETAIL")
+	fmt.Fprintln(writer, "NAME\tGROUP\tSTATE\tPID\tCPU\tMEMORY\tCHILDREN\tDESCENDANTS\tGOROUTINES\tUPTIME\tSTARTS\tEXIT\tDETAIL")
 	for _, status := range statuses {
-		pid, cpu, memory, exit := "-", "-", "-", "-"
+		pid, cpu, memory, children, descendants, goroutines, exit := "-", "-", "-", "-", "-", "-", "-"
 		if status.PID != 0 {
 			pid = strconv.Itoa(status.PID)
 			cpu = fmt.Sprintf("%.1f%%", status.CPU)
 			memory = formatBytes(status.Memory)
+			children = strconv.Itoa(status.Children)
+			descendants = strconv.Itoa(status.Descendants)
+			if status.Goroutines != nil {
+				goroutines = strconv.Itoa(*status.Goroutines)
+			}
 		}
 		if status.ExitCode != nil {
 			exit = strconv.Itoa(*status.ExitCode)
@@ -340,7 +399,22 @@ func printStatuses(statuses []supervisor.Status) {
 			}
 			detail += fmt.Sprintf("restarts=%d", status.Restarts)
 		}
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", status.Name, status.Group, status.State, pid, cpu, memory, valueOrDash(status.Uptime), status.Starts, exit, detail)
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", status.Name, status.Group, status.State, pid, cpu, memory, children, descendants, goroutines, valueOrDash(status.Uptime), status.Starts, exit, detail)
+	}
+	_ = writer.Flush()
+}
+
+// printList renders a compact overview of managed processes. Unlike
+// printStatuses it omits CPU, memory, restart and exit detail for a quick scan.
+func printList(statuses []supervisor.Status) {
+	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "NAME\tGROUP\tSTATE\tPID\tUPTIME")
+	for _, status := range statuses {
+		pid := "-"
+		if status.PID != 0 {
+			pid = strconv.Itoa(status.PID)
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", status.Name, status.Group, status.State, pid, valueOrDash(status.Uptime))
 	}
 	_ = writer.Flush()
 }
@@ -477,8 +551,11 @@ func usage(writer io.Writer) {
 	fmt.Fprintln(writer, `Usage:
 	pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
   pm [-socket PATH] status [NAME...]
+  pm [-socket PATH] list [NAME...]
   pm [-socket PATH] start|stop|restart NAME|all
   pm [-socket PATH] reload|shutdown
   pm [-socket PATH] logs [-n LINES] [-f] [-stderr] NAME
-  pm version`)
+  pm llms.txt
+  pm version | pm -v
+  pm help | pm -h | pm --help`)
 }

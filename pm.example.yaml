@@ -1,10 +1,11 @@
 # PM 守护进程配置文件（YAML）。
 # 所有相对路径均以本文件所在目录为基准。
+# 安装后默认配置位于 ~/.pm/pm.yaml，首次启动守护进程时自动生成。
 
 # CLI 控制 Socket 路径。
-socket: run/pm.sock
-# 事件历史等运行状态目录。
-state_dir: .pm
+socket: pm.sock
+# 事件历史等运行状态目录；"." 表示配置文件所在目录。
+state_dir: .
 # 内存中保留的事件数量；0 为关闭。
 event_history: 1000
 
@@ -38,6 +39,8 @@ programs:
     stop_timeout: 10s
     stdout_log: logs/example-worker.log
     stderr_log: logs/example-worker.error.log
+    # Go 程序启用 net/http/pprof 后可配置，用于采集 goroutine 数。
+    # pprof_url: http://127.0.0.1:6060/debug/pprof
     # 单个日志文件切割阈值；0 为不切割。
     log_max_bytes: 10485760
     # 保留的轮转日志数量。

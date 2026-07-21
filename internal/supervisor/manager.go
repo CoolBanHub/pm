@@ -26,26 +26,30 @@ const (
 )
 
 type Status struct {
-	Name      string    `json:"name"`
-	Group     string    `json:"group"`
-	State     string    `json:"state"`
-	PID       int       `json:"pid,omitempty"`
-	Uptime    string    `json:"uptime,omitempty"`
-	Starts    int       `json:"starts"`
-	Restarts  int       `json:"restarts"`
-	ExitCode  *int      `json:"exit_code,omitempty"`
-	LastError string    `json:"last_error,omitempty"`
-	StartedAt time.Time `json:"started_at,omitzero"`
-	ExitedAt  time.Time `json:"exited_at,omitzero"`
-	StdoutLog string    `json:"stdout_log,omitempty"`
-	StderrLog string    `json:"stderr_log,omitempty"`
-	Command   string    `json:"command"`
-	Args      []string  `json:"args,omitempty"`
-	Directory string    `json:"directory,omitempty"`
-	Autostart bool      `json:"autostart"`
-	Restart   string    `json:"restart_policy"`
-	CPU       float64   `json:"cpu_percent"`
-	Memory    int64     `json:"memory_bytes"`
+	Name        string    `json:"name"`
+	Group       string    `json:"group"`
+	State       string    `json:"state"`
+	PID         int       `json:"pid,omitempty"`
+	Uptime      string    `json:"uptime,omitempty"`
+	Starts      int       `json:"starts"`
+	Restarts    int       `json:"restarts"`
+	ExitCode    *int      `json:"exit_code,omitempty"`
+	LastError   string    `json:"last_error,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitzero"`
+	ExitedAt    time.Time `json:"exited_at,omitzero"`
+	StdoutLog   string    `json:"stdout_log,omitempty"`
+	StderrLog   string    `json:"stderr_log,omitempty"`
+	Command     string    `json:"command"`
+	Args        []string  `json:"args,omitempty"`
+	Directory   string    `json:"directory,omitempty"`
+	Autostart   bool      `json:"autostart"`
+	Restart     string    `json:"restart_policy"`
+	CPU         float64   `json:"cpu_percent"`
+	Memory      int64     `json:"memory_bytes"`
+	Children    int       `json:"child_processes"`
+	Descendants int       `json:"descendant_processes"`
+	Goroutines  *int      `json:"goroutines,omitempty"`
+	PprofURL    string    `json:"-"`
 }
 
 type Process struct {
@@ -301,6 +305,7 @@ func (p *Process) Status() Status {
 		Directory: p.config.Directory,
 		Autostart: p.config.Autostart,
 		Restart:   p.config.Restart,
+		PprofURL:  p.config.PprofURL,
 	}
 	if p.command != nil && p.command.Process != nil {
 		status.PID = p.command.Process.Pid
@@ -369,12 +374,14 @@ func (p *Process) UpdateMetadata(program config.Program) {
 	defer p.mu.Unlock()
 	p.config.Group = program.Group
 	p.config.Autostart = program.Autostart
+	p.config.PprofURL = program.PprofURL
 	p.emitLocked("configured", "metadata updated")
 }
 
 func runtimeEqual(left, right config.Program) bool {
 	left.Group, right.Group = "", ""
 	left.Autostart, right.Autostart = false, false
+	left.PprofURL, right.PprofURL = "", ""
 	return reflect.DeepEqual(left, right)
 }
 

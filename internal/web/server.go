@@ -149,7 +149,6 @@ func (s *Server) handleProcesses(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, response.Message)
 		return
 	}
-	supervisor.CollectMetrics(response.Processes)
 	writeJSON(w, http.StatusOK, map[string]any{"processes": response.Processes, "timestamp": time.Now()})
 }
 
