@@ -88,6 +88,8 @@
               <option value="start">启动选中项</option>
               <option value="restart">重启选中项</option>
               <option value="stop">停止选中项</option>
+              <option value="pause">暂停选中项</option>
+              <option value="resume">恢复选中项</option>
             </select>
             <button id="bulk-apply" class="button secondary" disabled>执行</button>
           </div>
@@ -172,9 +174,24 @@
     <div id="tab-overview" class="drawer-content tab-panel"></div>
     <div id="tab-logs" class="drawer-content tab-panel hidden">
       <div class="log-toolbar">
-        <select id="log-stream" aria-label="日志流"><option value="stdout">标准输出</option><option value="stderr">标准错误</option></select>
-        <label class="toggle"><input id="log-follow" type="checkbox" checked><span></span>自动滚动</label>
-        <button id="log-clear" class="button quiet">清空视图</button>
+        <div class="log-controls">
+          <select id="log-stream" aria-label="日志流"><option value="stdout">标准输出</option><option value="stderr">标准错误</option></select>
+          <label class="toggle"><input id="log-follow" type="checkbox" checked><span></span>自动滚动</label>
+          <button id="log-clear" class="button quiet">清空视图</button>
+        </div>
+        <div class="log-search">
+          <div class="search-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+            <input id="log-search" type="search" placeholder="搜索当前日志" aria-label="搜索当前日志">
+          </div>
+          <span id="log-match-count" class="log-match-count" aria-live="polite">0 / 0</span>
+          <button id="log-match-prev" class="icon-button" title="上一个匹配" aria-label="上一个匹配">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+          </button>
+          <button id="log-match-next" class="icon-button" title="下一个匹配" aria-label="下一个匹配">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+        </div>
       </div>
       <pre id="log-output" class="log-output"></pre>
     </div>
@@ -239,6 +256,7 @@
   </div>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="row-more-menu" class="row-more-menu hidden" role="menu"></div>
   <script src="/app.js" defer></script>
 </body>
 </html>

@@ -333,9 +333,11 @@ type Manager struct {
 
 func (m *Manager) Apply(programs []config.Program) error {
 	programs = m.states.Apply(programs)
+	programNames := make([]string, 0, len(programs))
 	next := make(map[string]config.Program, len(programs))
 	for _, program := range programs {
 		next[program.Name] = program
+		programNames = append(programNames, program.Name)
 	}
 	var errs []error
 	for name, process := range m.processes {
@@ -390,7 +392,10 @@ func (m *Manager) Apply(programs []config.Program) error {
 			}
 		}
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	return m.states.Prune(programNames)
 }
 
 func (p *Process) UpdateMetadata(program config.Program) {

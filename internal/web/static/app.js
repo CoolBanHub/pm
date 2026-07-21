@@ -15,6 +15,8 @@ const state = {
   filter: 'all', groupFilter: 'all', query: '',
   selected: null, selectedNames: new Set(), editingName: null,
   logController: null, logPaused: false, confirmAction: null,
+  logContent: '', logQuery: '', logMatchIndex: -1,
+  moreMenuName: null,
   // new
   sortKey: 'name', sortDir: 'asc',
   lastSig: '', lastCount: -1, firstLoad: true,
@@ -195,8 +197,8 @@ function rowMarkup(process, animate) {
   return `<tr data-name="${escapeAttr(process.name)}" class="${animate ? 'is-entering' : ''}">
     <td class="check-column"><input type="checkbox" data-select="${escapeAttr(process.name)}" aria-label="选择 ${escapeAttr(process.name)}" ${state.selectedNames.has(process.name) ? 'checked' : ''}></td>
     <td><button class="process-name" data-detail="${escapeAttr(process.name)}">${escapeHTML(process.name)}</button><span class="process-command">${escapeHTML(commandText(process))}</span></td>
-    <td><span class="group-tag">${escapeHTML(process.group || 'default')}</span></td>
-    <td class="cell-state">${statusBadge(process.state)}</td>
+    <td><button class="group-tag group-button" data-edit-group="${escapeAttr(process.name)}" title="修改分组">${escapeHTML(process.group || 'default')}</button></td>
+    <td class="cell-state">${statusBadge(process.state, '', process.paused)}</td>
     <td class="num-col cell-pid"><span class="metric">${process.pid || '-'}</span></td>
     <td class="num-col cell-cpu"><span class="metric">${process.pid ? `${(process.cpu_percent || 0).toFixed(1)}%` : '-'}</span></td>
     <td class="num-col cell-mem"><span class="metric">${process.pid ? formatBytes(process.memory_bytes || 0) : '-'}</span></td>
@@ -204,7 +206,7 @@ function rowMarkup(process, animate) {
     <td class="num-col cell-goroutines"><span class="metric">${process.pid && Number.isInteger(process.goroutines) ? process.goroutines : '-'}</span></td>
     <td class="num-col cell-up">${escapeHTML(process.uptime || '-')}</td>
     <td class="num-col cell-restarts">${process.restarts || 0}</td>
-    <td><div class="row-actions">${actionButtons(process)}</div></td>
+    <td><div class="row-actions">${rowActionButtons(process)}</div></td>
   </tr>`;
 }
 function renderSkeleton() {
@@ -219,6 +221,7 @@ function renderProcesses() {
   $('#process-count').textContent = `${processes.length} / ${state.processes.length} 个进程`;
   updateSelectionUI();
   if (processes.length === 0) {
+    closeMoreMenu();
     $('#process-list').innerHTML = '';
     $('#empty-state').classList.remove('hidden');
     state.lastSig = ''; state.lastCount = -1;
@@ -226,12 +229,13 @@ function renderProcesses() {
   }
   $('#empty-state').classList.add('hidden');
 
-  const sig = processes.map(p => `${p.name}:${p.state}`).join('|');
+  const sig = processes.map(p => `${p.name}:${p.group}:${p.state}:${p.paused}:${p.disabled}:${commandText(p)}`).join('|');
   if (sig === state.lastSig && processes.length === state.lastCount) {
     updateRowsInPlace(processes);   // smooth: only metrics drifted
     return;
   }
   const animate = state.firstLoad || state.lastCount !== processes.length;
+  closeMoreMenu();
   $('#process-list').innerHTML = processes.map(p => rowMarkup(p, animate)).join('');
   state.lastSig = sig; state.lastCount = processes.length;
 }
@@ -272,10 +276,59 @@ function updateSelectionUI() {
 }
 
 function actionButtons(process) {
-  if (process.state === 'RUNNING' || process.state === 'BACKOFF' || process.state === 'STOPPING') {
-    return `<button class="button secondary" data-action="restart" data-name="${escapeAttr(process.name)}">重启</button><button class="button secondary" data-action="stop" data-name="${escapeAttr(process.name)}">停止</button>`;
+  const logs = `<button class="button quiet" data-logs="${escapeAttr(process.name)}">日志</button>`;
+  if (process.paused) {
+    return `${logs}<button class="button primary" data-action="resume" data-name="${escapeAttr(process.name)}">恢复</button>`;
   }
-  return `<button class="button primary" data-action="start" data-name="${escapeAttr(process.name)}">启动</button>`;
+  if (process.state === 'RUNNING' || process.state === 'BACKOFF' || process.state === 'STOPPING') {
+    return `${logs}<button class="button secondary" data-action="restart" data-name="${escapeAttr(process.name)}">重启</button><button class="button secondary" data-action="stop" data-name="${escapeAttr(process.name)}">停止</button><button class="button secondary" data-action="pause" data-name="${escapeAttr(process.name)}">暂停</button>`;
+  }
+  return `${logs}<button class="button secondary" data-action="pause" data-name="${escapeAttr(process.name)}">暂停</button><button class="button primary" data-action="start" data-name="${escapeAttr(process.name)}">启动</button>`;
+}
+
+function rowActionButtons(process) {
+  let primary = '';
+  if (process.paused) {
+    primary = `<button class="button primary" data-action="resume" data-name="${escapeAttr(process.name)}">恢复</button>`;
+  } else if (process.state === 'RUNNING' || process.state === 'BACKOFF' || process.state === 'STOPPING') {
+    primary = `<button class="button secondary" data-action="restart" data-name="${escapeAttr(process.name)}">重启</button><button class="button secondary" data-action="stop" data-name="${escapeAttr(process.name)}">停止</button>`;
+  } else {
+    primary = `<button class="button primary" data-action="start" data-name="${escapeAttr(process.name)}">启动</button>`;
+  }
+  return `${primary}<button class="button secondary more-button" data-more="${escapeAttr(process.name)}" aria-expanded="false">更多<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>`;
+}
+
+function moreMenuMarkup(process) {
+  const pause = process.paused ? '' : `<button role="menuitem" data-action="pause" data-name="${escapeAttr(process.name)}"><span>暂停</span></button>`;
+  const remove = process.paused ? `<button role="menuitem" class="danger" data-delete="${escapeAttr(process.name)}"><span>删除</span></button>` : '';
+  return `<button role="menuitem" data-logs="${escapeAttr(process.name)}"><span>查看日志</span></button>
+    <button role="menuitem" data-edit="${escapeAttr(process.name)}"><span>编辑配置</span></button>
+    ${pause}${remove}`;
+}
+
+function closeMoreMenu() {
+  $('#row-more-menu').classList.add('hidden');
+  $$('[data-more][aria-expanded="true"]').forEach(button => button.setAttribute('aria-expanded', 'false'));
+  state.moreMenuName = null;
+}
+
+function openMoreMenu(button) {
+  const name = button.dataset.more;
+  if (state.moreMenuName === name) return closeMoreMenu();
+  const process = state.processes.find(item => item.name === name);
+  if (!process) return;
+  closeMoreMenu();
+  const menu = $('#row-more-menu');
+  menu.innerHTML = moreMenuMarkup(process);
+  menu.classList.remove('hidden');
+  button.setAttribute('aria-expanded', 'true');
+  state.moreMenuName = name;
+  const rect = button.getBoundingClientRect();
+  const top = rect.bottom + 6 + menu.offsetHeight <= window.innerHeight
+    ? rect.bottom + 6
+    : Math.max(8, rect.top - menu.offsetHeight - 6);
+  menu.style.top = `${top}px`;
+  menu.style.left = `${Math.max(8, rect.right - menu.offsetWidth)}px`;
 }
 
 /* row interaction */
@@ -287,9 +340,34 @@ $('#process-list').addEventListener('click', (event) => {
   }
   const detail = event.target.closest('[data-detail]');
   if (detail) return openDrawer(detail.dataset.detail);
+  const group = event.target.closest('[data-edit-group]');
+  if (group) return openProcessForm(group.dataset.editGroup, '#process-group');
+  const logs = event.target.closest('[data-logs]');
+  if (logs) { closeMoreMenu(); return openDrawer(logs.dataset.logs, 'logs'); }
+  const more = event.target.closest('[data-more]');
+  if (more) return openMoreMenu(more);
   const button = event.target.closest('[data-action]');
-  if (button) return requestAction(button.dataset.action, button.dataset.name);
+  if (button) { closeMoreMenu(); return requestAction(button.dataset.action, button.dataset.name); }
 });
+
+$('#row-more-menu').addEventListener('click', event => {
+  const logs = event.target.closest('[data-logs]');
+  if (logs) { closeMoreMenu(); return openDrawer(logs.dataset.logs, 'logs'); }
+  const edit = event.target.closest('[data-edit]');
+  if (edit) { closeMoreMenu(); return openProcessForm(edit.dataset.edit); }
+  const remove = event.target.closest('[data-delete]');
+  if (remove) {
+    closeMoreMenu();
+    return confirm(`确认删除已暂停的进程 ${remove.dataset.delete}？`, () => deleteProcess(remove.dataset.delete));
+  }
+  const action = event.target.closest('[data-action]');
+  if (action) { closeMoreMenu(); return requestAction(action.dataset.action, action.dataset.name); }
+});
+document.addEventListener('click', event => {
+  if (!event.target.closest('[data-more]') && !event.target.closest('#row-more-menu')) closeMoreMenu();
+});
+window.addEventListener('resize', closeMoreMenu);
+window.addEventListener('scroll', closeMoreMenu, true);
 $('#search').addEventListener('input', e => { state.query = e.target.value; renderProcesses(); });
 $('#group-filter').addEventListener('change', e => { state.groupFilter = e.target.value; renderProcesses(); });
 $('#state-filter').addEventListener('click', e => {
@@ -313,10 +391,11 @@ $('#selection-clear').addEventListener('click', () => { state.selectedNames.clea
    Actions (start / stop / restart / bulk)
    ============================================================ */
 async function requestAction(action, name = 'all') {
-  const destructive = action === 'stop' || action === 'restart';
+  const destructive = action === 'stop' || action === 'restart' || action === 'pause';
   if (destructive) {
     const target = name === 'all' ? '全部进程' : name;
-    return confirm(`确认${action === 'stop' ? '停止' : '重启'} ${target}？`, () => runAction(action, name));
+    const label = { stop: '停止', restart: '重启', pause: '暂停' }[action];
+    return confirm(`确认${label} ${target}？`, () => runAction(action, name));
   }
   return runAction(action, name);
 }
@@ -340,7 +419,10 @@ $('#bulk-apply').addEventListener('click', () => {
   const names = [...state.selectedNames];
   if (!names.length) return toast('请先选择进程', true);
   const execute = () => runBulkAction(action, names);
-  if (action === 'stop' || action === 'restart') confirm(`确认${action === 'stop' ? '停止' : '重启'}选中的 ${names.length} 个进程？`, execute);
+  if (action === 'stop' || action === 'restart' || action === 'pause') {
+    const label = { stop: '停止', restart: '重启', pause: '暂停' }[action];
+    confirm(`确认${label}选中的 ${names.length} 个进程？`, execute);
+  }
   else execute();
 });
 $('#bulk-action').addEventListener('change', updateSelectionUI);
@@ -353,10 +435,10 @@ function spinRefresh() {
 /* ============================================================
    Drawer
    ============================================================ */
-function openDrawer(name) {
+function openDrawer(name, tab = 'overview') {
   state.selected = state.processes.find(p => p.name === name); if (!state.selected) return;
   $('#drawer-backdrop').classList.remove('hidden'); $('#process-drawer').classList.add('open');
-  $('#process-drawer').setAttribute('aria-hidden', 'false'); switchTab('overview'); renderDrawer();
+  $('#process-drawer').setAttribute('aria-hidden', 'false'); renderDrawer(); switchTab(tab);
 }
 function closeDrawer() {
   stopLogStream(); $('#drawer-backdrop').classList.add('hidden'); $('#process-drawer').classList.remove('open');
@@ -367,19 +449,21 @@ $('#drawer-backdrop').addEventListener('click', closeDrawer);
 
 function renderDrawer() {
   const p = state.selected; if (!p) return;
-  $('#drawer-title').textContent = p.name; $('#drawer-state').outerHTML = statusBadge(p.state, 'drawer-state');
+  $('#drawer-title').textContent = p.name; $('#drawer-state').outerHTML = statusBadge(p.state, 'drawer-state', p.paused);
   $('#tab-overview').innerHTML = `<div class="detail-grid">
     ${detail('状态', p.state)}${detail('所属分组', p.group || 'default')}${detail('PID', p.pid || '-')}${detail('CPU', p.pid ? `${(p.cpu_percent || 0).toFixed(1)}%` : '-')}${detail('内存', p.pid ? formatBytes(p.memory_bytes || 0) : '-')}
     ${detail('直接子进程', p.pid ? (p.child_processes || 0) : '-')}${detail('全部后代进程', p.pid ? (p.descendant_processes || 0) : '-')}${detail('Go 协程', p.pid && Number.isInteger(p.goroutines) ? p.goroutines : '-')}
     ${detail('运行时间', p.uptime || '-')}${detail('启动次数', p.starts)}${detail('重启次数', p.restarts)}${detail('重启策略', p.restart_policy)}
     ${detail('命令', commandText(p), true)}${detail('工作目录', p.directory || '-', true)}${detail('标准输出', p.stdout_log || '未配置', true)}${detail('标准错误', p.stderr_log || '未配置', true)}
     ${p.last_error ? detail('最近错误', p.last_error, true) : ''}</div>`;
-  $('#drawer-actions').innerHTML = `<button class="button quiet" data-delete="${escapeAttr(p.name)}">删除</button><button class="button secondary" data-edit="${escapeAttr(p.name)}">编辑配置</button>${actionButtons(p)}`;
+  const deleteHint = p.paused ? '删除进程' : '请先暂停进程后再删除';
+  $('#drawer-actions').innerHTML = `<button class="button quiet" data-delete="${escapeAttr(p.name)}" title="${deleteHint}" ${p.paused ? '' : 'disabled'}>删除</button><button class="button secondary" data-edit="${escapeAttr(p.name)}">编辑配置</button>${actionButtons(p)}`;
   renderDrawerEvents();
 }
 $('#drawer-actions').addEventListener('click', e => {
   const edit = e.target.closest('[data-edit]'); if (edit) return openProcessForm(edit.dataset.edit);
-  const remove = e.target.closest('[data-delete]'); if (remove) return confirm(`确认删除进程 ${remove.dataset.delete}？`, () => deleteProcess(remove.dataset.delete));
+  const remove = e.target.closest('[data-delete]'); if (remove) return confirm(`确认删除已暂停的进程 ${remove.dataset.delete}？`, () => deleteProcess(remove.dataset.delete));
+  const logs = e.target.closest('[data-logs]'); if (logs) return switchTab('logs');
   const button = e.target.closest('[data-action]'); if (button) requestAction(button.dataset.action, button.dataset.name);
 });
 
@@ -408,16 +492,28 @@ function eventMarkup(events) {
    ============================================================ */
 $('#log-stream').addEventListener('change', startLogStream);
 $('#log-follow').addEventListener('change', e => { state.logPaused = !e.target.checked; });
-$('#log-clear').addEventListener('click', () => { $('#log-output').textContent = ''; });
+$('#log-clear').addEventListener('click', () => { state.logContent = ''; state.logMatchIndex = -1; renderLog(); });
+$('#log-search').addEventListener('input', event => {
+  state.logQuery = event.target.value;
+  state.logMatchIndex = state.logQuery ? 0 : -1;
+  renderLog(true);
+});
+$('#log-search').addEventListener('keydown', event => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  moveLogMatch(event.shiftKey ? -1 : 1);
+});
+$('#log-match-prev').addEventListener('click', () => moveLogMatch(-1));
+$('#log-match-next').addEventListener('click', () => moveLogMatch(1));
 async function startLogStream() {
   stopLogStream(); if (!state.selected) return;
-  const output = $('#log-output'); output.textContent = '正在连接日志流...\n';
+  state.logContent = '正在连接日志流...\n'; state.logMatchIndex = -1; renderLog();
   const controller = new AbortController(); state.logController = controller;
   try {
     const headers = state.token ? { Authorization: `Bearer ${state.token}` } : {};
-    const response = await fetch(`/api/v1/logs/${encodeURIComponent(state.selected.name)}/stream?stream=${$('#log-stream').value}`, { headers, signal: controller.signal });
+    const response = await fetch(`/api/v1/logs/${encodeURIComponent(state.selected.name)}/stream?stream=${$('#log-stream').value}&tail=2000`, { headers, signal: controller.signal });
     if (!response.ok) { const body = await response.json(); throw new Error(body.error); }
-    output.textContent = '';
+    state.logContent = ''; renderLog();
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending = '';
     while (true) {
       const { value, done } = await reader.read(); if (done) break;
@@ -428,13 +524,59 @@ async function startLogStream() {
         if (line) appendLog(JSON.parse(line.slice(6)));
       }
     }
-  } catch (error) { if (error.name !== 'AbortError') output.textContent += `\n[日志流错误] ${error.message}`; }
+  } catch (error) { if (error.name !== 'AbortError') appendLog(`\n[日志流错误] ${error.message}`); }
 }
 function stopLogStream() { if (state.logController) state.logController.abort(); state.logController = null; }
 function appendLog(chunk) {
-  const output = $('#log-output'); output.textContent += chunk;
-  if (!state.logPaused) output.scrollTop = output.scrollHeight;
-  if (output.textContent.length > 500000) output.textContent = output.textContent.slice(-400000);
+  state.logContent += chunk;
+  if (state.logContent.length > 500000) state.logContent = state.logContent.slice(-400000);
+  renderLog();
+}
+function logMatches() {
+  const query = state.logQuery.toLocaleLowerCase();
+  if (!query) return [];
+  const content = state.logContent.toLocaleLowerCase();
+  const matches = [];
+  let offset = 0;
+  while (matches.length < 1000) {
+    const index = content.indexOf(query, offset);
+    if (index < 0) break;
+    matches.push(index); offset = index + Math.max(query.length, 1);
+  }
+  return matches;
+}
+function renderLog(focusMatch = false) {
+  const output = $('#log-output');
+  const matches = logMatches();
+  if (!matches.length || !state.logQuery) {
+    output.textContent = state.logContent;
+    state.logMatchIndex = -1;
+  } else {
+    state.logMatchIndex = Math.max(0, Math.min(state.logMatchIndex, matches.length - 1));
+    const fragment = document.createDocumentFragment();
+    let offset = 0;
+    matches.forEach((index, matchIndex) => {
+      fragment.append(document.createTextNode(state.logContent.slice(offset, index)));
+      const mark = document.createElement('mark');
+      mark.className = matchIndex === state.logMatchIndex ? 'current' : '';
+      mark.textContent = state.logContent.slice(index, index + state.logQuery.length);
+      fragment.append(mark); offset = index + state.logQuery.length;
+    });
+    fragment.append(document.createTextNode(state.logContent.slice(offset)));
+    output.replaceChildren(fragment);
+  }
+  const total = matches.length;
+  $('#log-match-count').textContent = total ? `${state.logMatchIndex + 1} / ${total}${total === 1000 ? '+' : ''}` : '0 / 0';
+  $('#log-match-prev').disabled = total === 0;
+  $('#log-match-next').disabled = total === 0;
+  if (focusMatch && total) output.querySelector('mark.current')?.scrollIntoView({ block: 'center' });
+  else if (!state.logPaused && !state.logQuery) output.scrollTop = output.scrollHeight;
+}
+function moveLogMatch(direction) {
+  const total = logMatches().length;
+  if (!total) return;
+  state.logMatchIndex = (state.logMatchIndex + direction + total) % total;
+  renderLog(true);
 }
 
 /* ============================================================
@@ -450,7 +592,7 @@ $('#process-name').addEventListener('blur', () => {
   if (!$('#process-stderr').value) $('#process-stderr').value = `logs/${name}.error.log`;
 });
 
-async function openProcessForm(name = '') {
+async function openProcessForm(name = '', focusField = '') {
   state.editingName = name || null;
   $('#process-form').reset();
   $('#process-group').value = 'default';
@@ -462,6 +604,7 @@ async function openProcessForm(name = '') {
   try {
     const data = await api(`/api/v1/processes/${encodeURIComponent(name)}/config`);
     fillProcessForm(data.program); $('#process-form-status').textContent = '';
+    if (focusField) $(focusField)?.focus();
   } catch (error) { $('#process-form-status').textContent = error.message; }
 }
 function closeProcessForm() { $('#process-modal').classList.add('hidden'); state.editingName = null; }
@@ -576,6 +719,7 @@ function toast(message, error = false) {
    Global keys: Esc closes overlays
    ============================================================ */
 function closeTopmost() {
+  if (!$('#row-more-menu').classList.contains('hidden')) return closeMoreMenu();
   if (!$('#confirm-modal').classList.contains('hidden')) return closeConfirm();
   if (!$('#process-modal').classList.contains('hidden')) return closeProcessForm();
   if (!$('#config-modal').classList.contains('hidden')) return $('#config-modal').classList.add('hidden');
@@ -588,10 +732,10 @@ document.addEventListener('keydown', event => {
 /* ============================================================
    Helpers
    ============================================================ */
-function statusBadge(status, id = '') {
+function statusBadge(status, id = '', paused = false) {
   const labels = { RUNNING: '运行中', STOPPED: '已停止', EXITED: '已退出', BACKOFF: '等待重启', STOPPING: '停止中', STARTING: '启动中', FATAL: '异常' };
   const cls = status === 'RUNNING' ? 'status-running' : status === 'FATAL' ? 'status-fatal' : status === 'BACKOFF' ? 'status-backoff' : '';
-  return `<span ${id ? `id="${id}"` : ''} class="status-badge ${cls}">${labels[status] || status}</span>`;
+  return `<span ${id ? `id="${id}"` : ''} class="status-badge ${paused ? 'status-backoff' : cls}">${paused ? '已暂停' : (labels[status] || status)}</span>`;
 }
 function detail(label, value, wide = false) { return `<div class="detail-item ${wide ? 'wide' : ''}"><span>${label}</span><code>${escapeHTML(String(value ?? '-'))}</code></div>`; }
 function commandText(p) { return [p.command, ...(p.args || [])].join(' '); }

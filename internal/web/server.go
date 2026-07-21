@@ -154,7 +154,7 @@ func (s *Server) handleProcesses(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleProcessAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
-	if action != "start" && action != "stop" && action != "restart" {
+	if action != "start" && action != "stop" && action != "restart" && action != "pause" && action != "resume" {
 		writeError(w, http.StatusNotFound, "unknown process action")
 		return
 	}
@@ -230,6 +230,19 @@ func (s *Server) handleUpdateProcess(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteProcess(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	status := s.backend.Execute(control.Request{Action: "status", Names: []string{name}})
+	if !status.OK || len(status.Processes) != 1 || status.Processes[0].Name != name {
+		message := status.Message
+		if message == "" {
+			message = fmt.Sprintf("unknown program %q", name)
+		}
+		writeError(w, http.StatusNotFound, message)
+		return
+	}
+	if !status.Processes[0].Paused {
+		writeError(w, http.StatusConflict, fmt.Sprintf("program %q must be paused before deletion", name))
+		return
+	}
 	err := s.updatePrograms(func(programs []config.Program) ([]config.Program, error) {
 		result := make([]config.Program, 0, len(programs))
 		found := false
@@ -254,7 +267,7 @@ func (s *Server) handleDeleteProcess(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
-	if action != "start" && action != "stop" && action != "restart" && action != "reload" {
+	if action != "start" && action != "stop" && action != "restart" && action != "pause" && action != "resume" && action != "reload" {
 		writeError(w, http.StatusNotFound, "unknown bulk action")
 		return
 	}
@@ -378,7 +391,14 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Connection", "keep-alive")
-	initial, _ := readLastLines(path, 200)
+	lines, _ := strconv.Atoi(r.URL.Query().Get("tail"))
+	if lines <= 0 || lines > 5000 {
+		lines = 300
+	}
+	initial, _ := readLastLines(path, lines)
+	if len(initial) > 0 {
+		initial = append(initial, '\n')
+	}
 	writeSSE(w, "chunk", string(initial))
 	flusher.Flush()
 

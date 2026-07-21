@@ -313,6 +313,51 @@ sudo systemctl start pm
 | 停服后残留子进程 | 确认单元里 `KillMode=control-group`（默认模板已含） |
 | 手动改了配置没生效 | 直接编辑文件后需 `pm reload`；改了 socket/web 等需 `systemctl restart pm` |
 
+## 11. 反向代理（Nginx + Cloudflare）
+
+PM 的 Web 后台只跑 HTTP。要在公网用域名访问（`https://pm.kbtoken.top`），用 Cloudflare 终结 TLS、回源到本机 nginx 再转给 PM，链路如下：
+
+```
+浏览器 ──HTTPS──▶ Cloudflare ──HTTP:80──▶ nginx ──▶ PM(127.0.0.1:19090)
+```
+
+这样源站只需 80 端口、无需证书。模板见 [deploy/nginx/pm.kbtoken.top.conf](nginx/pm.kbtoken.top.conf)。
+
+> 暴露公网前请务必配置强 `PM_WEB_TOKEN`（`openssl rand -hex 24`），PM 的全部 API 都要校验它。进程管理器能执行任意外部程序，建议同时评估叠加 IP 白名单或「仅允许 CF 回源」（模板里给出可选注释行）。
+
+### 前置条件
+
+- DNS：`pm.kbtoken.top` 的 A 记录指向本机公网 IP（如 `23.251.34.152`），**橙云（Proxy）开启**——解析出来是 Cloudflare 的 IP。
+- PM 已运行，本机 `curl -fsS http://127.0.0.1:19090/healthz` 返回 `{"status":"ok"}`。
+- 放行 80 端口（云厂商安全组 + 主机防火墙；本方案源站不用 443）。
+
+### 启用站点
+
+```bash
+sudo cp deploy/nginx/pm.kbtoken.top.conf /etc/nginx/sites-available/pm.kbtoken.top
+sudo ln -sf /etc/nginx/sites-available/pm.kbtoken.top /etc/nginx/sites-enabled/pm.kbtoken.top
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+服务器本机自测（绕过 CF，直连源站 nginx）：
+
+```bash
+curl -H "Host: pm.kbtoken.top" http://127.0.0.1/healthz     # 应返回 {"status":"ok"}
+```
+
+### Cloudflare 侧设置
+
+- **SSL/TLS 模式 = Flexible**：源站只有 80、无证书，CF 负责 HTTPS、回源走 HTTP。若误设 Full / Full(strict)，会因源站无 443 报 522/525。
+- **Always Use HTTPS = On**：强制浏览器跳 HTTPS。
+- 可选：开启 WAF、Bot 防护、速率限制，给登录接口加一层防护。
+
+### 注意事项
+
+- CF 回源时 nginx 看到的 `$remote_addr` 是 CF 的 IP；模板已用 `set_real_ip_from` + `CF-Connecting-IP` 还原真实访客 IP（段来自 cloudflare.com/ips，需定期更新）。若 `nginx.conf` 全局已配过，删除模板里这段以免重复。
+- SSE 日志流 location（`/api/v1/logs/{name}/stream`）关闭了 `proxy_buffering` 并放宽超时，勿删。CF 免费版对长连接有空闲超时（约 100s），日志持续推送不受影响；长时间无数据前端会自动重连。
+- Flexible 模式下 CF→源站是明文 HTTP。若要全程加密，需在源站上 443 + 证书（如 Let's Encrypt）并把 CF 改为 Full(strict)。
+- 若 PM 的 `web.listen` 改过（非 `127.0.0.1:19090`），同步修改模板里两处 `proxy_pass`。
+
 ## macOS launchd 附录
 
 macOS 本机开发或单用户长期运行，建议使用用户级 `LaunchAgent`，不要使用 `sudo`，这样 PM 和受管程序都以当前用户身份运行，配置、日志和工作目录也可以放在用户目录下。模板见 [deploy/launchd/com.local.pm.plist.example](launchd/com.local.pm.plist.example)。要点与 systemd 一致：以前台 `daemon` 模式运行，由 launchd 的 `KeepAlive` 负责守护，不要加 `-d`。

@@ -100,3 +100,29 @@ func TestProgramStateStoreDoesNotApplyFailedWrite(t *testing.T) {
 		t.Fatal("failed write changed in-memory state")
 	}
 }
+
+func TestProgramStateStorePrunesRemovedPrograms(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ProgramStateFile)
+	store, err := NewProgramStateStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set([]string{"keep", "remove"}, func(mode ProgramMode) ProgramMode {
+		mode.Paused = true
+		return mode
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Prune([]string{"keep"}); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewProgramStateStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	programs := reloaded.Apply([]config.Program{{Name: "keep"}, {Name: "remove"}})
+	if !programs[0].Paused || programs[1].Paused {
+		t.Fatalf("pruned modes = %+v", programs)
+	}
+}

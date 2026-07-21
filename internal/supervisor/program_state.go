@@ -82,6 +82,33 @@ func (s *ProgramStateStore) Set(names []string, update func(ProgramMode) Program
 	return nil
 }
 
+// Prune removes state for programs that no longer exist in the configuration.
+func (s *ProgramStateStore) Prune(names []string) error {
+	if s == nil {
+		return nil
+	}
+	valid := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		valid[name] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make(map[string]ProgramMode, len(s.modes))
+	for name, mode := range s.modes {
+		if _, exists := valid[name]; exists {
+			next[name] = mode
+		}
+	}
+	if len(next) == len(s.modes) {
+		return nil
+	}
+	if err := s.writeLocked(next); err != nil {
+		return err
+	}
+	s.modes = next
+	return nil
+}
+
 func (s *ProgramStateStore) writeLocked(modes map[string]ProgramMode) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return fmt.Errorf("create program state directory: %w", err)

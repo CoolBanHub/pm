@@ -119,6 +119,52 @@ func TestConfigUpdateIsValidatedBackedUpAndApplied(t *testing.T) {
 	}
 }
 
+func TestDeleteProcessRequiresPausedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pm.yaml")
+	content := "web:\n  enabled: false\nprograms:\n  - name: worker\n    command: /bin/true\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeBackend{
+		configPath: path,
+		statuses:   []supervisor.Status{{Name: "worker", State: supervisor.StateStopped}},
+	}
+	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/processes/worker", nil)
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "must be paused") {
+		t.Fatalf("delete = %d %s", response.Code, response.Body.String())
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != content {
+		t.Fatalf("configuration changed after rejected delete: %q", current)
+	}
+}
+
+func TestPauseAndResumeProcessActions(t *testing.T) {
+	backend := &fakeBackend{statuses: []supervisor.Status{{Name: "worker"}}}
+	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
+	handler := server.routes()
+	for _, action := range []string{"pause", "resume"} {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/processes/worker/"+action, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s = %d %s", action, response.Code, response.Body.String())
+		}
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.requests) != 2 || backend.requests[0].Action != "pause" || backend.requests[1].Action != "resume" {
+		t.Fatalf("requests = %+v", backend.requests)
+	}
+}
+
 func TestLogTailEndpoint(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o600); err != nil {
@@ -150,7 +196,7 @@ func TestProcessCRUDUpdatesConfiguration(t *testing.T) {
 	if err := os.WriteFile(path, []byte("web:\n  enabled: false\nprograms: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	backend := &fakeBackend{configPath: path}
+	backend := &fakeBackend{configPath: path, statuses: []supervisor.Status{{Name: "worker", State: supervisor.StateStopped, Paused: true}}}
 	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
 	handler := server.routes()
 
