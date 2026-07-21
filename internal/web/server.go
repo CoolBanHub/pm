@@ -3,8 +3,10 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -95,20 +97,78 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/config/validate", s.api(s.handleValidateConfig))
 	mux.HandleFunc("PUT /api/v1/config", s.api(s.handlePutConfig))
 
-	assets, _ := fs.Sub(staticFiles, "static")
+	assets, index, assetVersion := versionedWebAssets()
 	files := http.FileServer(http.FS(assets))
-	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		if r.URL.Path != "/" {
-			if _, err := fs.Stat(assets, strings.TrimPrefix(r.URL.Path, "/")); err != nil {
-				r.URL.Path = "/"
-			}
+	mux.HandleFunc("GET /assets/{version}/{name}", func(w http.ResponseWriter, r *http.Request) {
+		setStaticSecurityHeaders(w)
+		if r.PathValue("version") != assetVersion {
+			http.NotFound(w, r)
+			return
 		}
+		name := r.PathValue("name")
+		if name != "app.js" && name != "app.css" && name != "favicon.svg" {
+			http.NotFound(w, r)
+			return
+		}
+		content, err := fs.ReadFile(assets, name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(content))
+	})
+	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setStaticSecurityHeaders(w)
+		if r.URL.Path == "/" {
+			serveWebIndex(w, index)
+			return
+		}
+		if _, err := fs.Stat(assets, strings.TrimPrefix(r.URL.Path, "/")); err != nil {
+			serveWebIndex(w, index)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
 		files.ServeHTTP(w, r)
 	}))
 	return mux
+}
+
+func versionedWebAssets() (fs.FS, []byte, string) {
+	assets, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		panic(fmt.Sprintf("load embedded web assets: %v", err))
+	}
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		panic(fmt.Sprintf("load embedded web index: %v", err))
+	}
+	hash := sha256.New()
+	for _, name := range []string{"app.css", "app.js", "favicon.svg"} {
+		content, readErr := fs.ReadFile(assets, name)
+		if readErr != nil {
+			panic(fmt.Sprintf("load embedded web asset %s: %v", name, readErr))
+		}
+		_, _ = hash.Write(content)
+	}
+	version := hex.EncodeToString(hash.Sum(nil))[:12]
+	prefix := []byte("/assets/" + version + "/")
+	index = bytes.ReplaceAll(index, []byte("/app.css"), append(append([]byte(nil), prefix...), "app.css"...))
+	index = bytes.ReplaceAll(index, []byte("/app.js"), append(append([]byte(nil), prefix...), "app.js"...))
+	index = bytes.ReplaceAll(index, []byte("/favicon.svg"), append(append([]byte(nil), prefix...), "favicon.svg"...))
+	return assets, index, version
+}
+
+func setStaticSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+}
+
+func serveWebIndex(w http.ResponseWriter, index []byte) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(index)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

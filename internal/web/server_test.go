@@ -81,6 +81,68 @@ func TestAPIAuthenticationAndOriginProtection(t *testing.T) {
 	}
 }
 
+func TestStaticAssetsUseContentFingerprintAndCachePolicy(t *testing.T) {
+	server := NewServer("", "", &fakeBackend{}, log.New(io.Discard, "", 0))
+	handler := server.routes()
+
+	indexRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	indexResponse := httptest.NewRecorder()
+	handler.ServeHTTP(indexResponse, indexRequest)
+	if indexResponse.Code != http.StatusOK || indexResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("index = %d cache=%q", indexResponse.Code, indexResponse.Header().Get("Cache-Control"))
+	}
+	marker := `src="/assets/`
+	start := strings.Index(indexResponse.Body.String(), marker)
+	if start < 0 {
+		t.Fatalf("fingerprinted script missing from index: %s", indexResponse.Body.String())
+	}
+	start += len(marker)
+	end := strings.Index(indexResponse.Body.String()[start:], `/app.js"`)
+	if end < 0 {
+		t.Fatalf("invalid fingerprinted script path: %s", indexResponse.Body.String())
+	}
+	version := indexResponse.Body.String()[start : start+end]
+	if len(version) != 12 {
+		t.Fatalf("asset version = %q", version)
+	}
+	for _, name := range []string{"app.js", "app.css", "favicon.svg"} {
+		if !strings.Contains(indexResponse.Body.String(), "/assets/"+version+"/"+name) {
+			t.Fatalf("%s does not use version %s", name, version)
+		}
+	}
+
+	assetRequest := httptest.NewRequest(http.MethodGet, "/assets/"+version+"/app.js", nil)
+	assetResponse := httptest.NewRecorder()
+	handler.ServeHTTP(assetResponse, assetRequest)
+	if assetResponse.Code != http.StatusOK || assetResponse.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("asset = %d cache=%q", assetResponse.Code, assetResponse.Header().Get("Cache-Control"))
+	}
+	if !strings.Contains(assetResponse.Body.String(), "bootstrap();") {
+		t.Fatal("fingerprinted app.js content is missing")
+	}
+
+	staleRequest := httptest.NewRequest(http.MethodGet, "/assets/old-version/app.js", nil)
+	staleResponse := httptest.NewRecorder()
+	handler.ServeHTTP(staleResponse, staleRequest)
+	if staleResponse.Code != http.StatusNotFound {
+		t.Fatalf("stale asset status = %d", staleResponse.Code)
+	}
+
+	legacyRequest := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	legacyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(legacyResponse, legacyRequest)
+	if legacyResponse.Code != http.StatusOK || legacyResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("legacy asset = %d cache=%q", legacyResponse.Code, legacyResponse.Header().Get("Cache-Control"))
+	}
+
+	fallbackRequest := httptest.NewRequest(http.MethodGet, "/processes/example", nil)
+	fallbackResponse := httptest.NewRecorder()
+	handler.ServeHTTP(fallbackResponse, fallbackRequest)
+	if fallbackResponse.Code != http.StatusOK || fallbackResponse.Header().Get("Cache-Control") != "no-store" || !strings.Contains(fallbackResponse.Body.String(), "<!doctype html>") {
+		t.Fatalf("fallback = %d cache=%q body=%q", fallbackResponse.Code, fallbackResponse.Header().Get("Cache-Control"), fallbackResponse.Body.String())
+	}
+}
+
 func TestConfigUpdateIsValidatedBackedUpAndApplied(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pm.yaml")
