@@ -60,8 +60,8 @@ func run(args []string) error {
 	}
 	args = global.Args()
 	if len(args) == 0 {
-		usage(os.Stderr)
-		return errors.New("a command is required")
+		usage(os.Stdout)
+		return nil
 	}
 
 	command := args[0]
@@ -69,13 +69,15 @@ func run(args []string) error {
 	switch command {
 	case "daemon":
 		return daemonCommand(args)
-	case "status", "start", "stop", "restart":
+	case "systemd":
+		return systemdCommand(args)
+	case "status", "start", "stop", "restart", "pause", "resume", "disable", "enable":
 		resolvedSocket, err := resolveControlSocket(*socket)
 		if err != nil {
 			return err
 		}
 		return controlCommand(resolvedSocket, command, args)
-	case "reload", "shutdown":
+	case "reload", "shutdown", "shundown":
 		if len(args) != 0 {
 			return fmt.Errorf("%s does not accept arguments", command)
 		}
@@ -213,7 +215,11 @@ func serveDaemon(configPath string, cfg config.Config) error {
 		return err
 	}
 	defer events.Close()
-	manager := supervisor.NewWithEvents(cfg.Programs, events)
+	states, err := supervisor.NewProgramStateStore(filepath.Join(cfg.StateDir, supervisor.ProgramStateFile))
+	if err != nil {
+		return err
+	}
+	manager := supervisor.NewWithState(cfg.Programs, events, states)
 	for _, err := range manager.Autostart() {
 		logger.Printf("autostart: %v", err)
 	}
@@ -344,7 +350,7 @@ func webReady(cfg config.Web) bool {
 }
 
 func controlCommand(socket, action string, names []string) error {
-	if len(names) == 0 && action != "status" && action != "reload" && action != "shutdown" {
+	if len(names) == 0 && action != "status" && action != "reload" && action != "shutdown" && action != "shundown" {
 		return fmt.Errorf("%s requires a program name or all", action)
 	}
 	response, err := control.Call(socket, control.Request{Action: action, Names: names})
@@ -376,9 +382,17 @@ func listCommand(socket string, names []string) error {
 
 func printStatuses(statuses []supervisor.Status) {
 	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "NAME\tGROUP\tSTATE\tPID\tCPU\tMEMORY\tCHILDREN\tDESCENDANTS\tGOROUTINES\tUPTIME\tSTARTS\tEXIT\tDETAIL")
+	fmt.Fprintln(writer, "NAME\tGROUP\tSTATE\tMODE\tPID\tCPU\tMEMORY\tCHILDREN\tDESCENDANTS\tGOROUTINES\tUPTIME\tSTARTS\tEXIT\tDETAIL")
 	for _, status := range statuses {
 		pid, cpu, memory, children, descendants, goroutines, exit := "-", "-", "-", "-", "-", "-", "-"
+		mode := "enabled"
+		if status.Disabled {
+			mode = "disabled"
+		} else if status.Paused {
+			mode = "paused"
+		} else if !status.Autostart {
+			mode = "manual"
+		}
 		if status.PID != 0 {
 			pid = strconv.Itoa(status.PID)
 			cpu = fmt.Sprintf("%.1f%%", status.CPU)
@@ -399,7 +413,7 @@ func printStatuses(statuses []supervisor.Status) {
 			}
 			detail += fmt.Sprintf("restarts=%d", status.Restarts)
 		}
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", status.Name, status.Group, status.State, pid, cpu, memory, children, descendants, goroutines, valueOrDash(status.Uptime), status.Starts, exit, detail)
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", status.Name, status.Group, status.State, mode, pid, cpu, memory, children, descendants, goroutines, valueOrDash(status.Uptime), status.Starts, exit, detail)
 	}
 	_ = writer.Flush()
 }
@@ -549,11 +563,13 @@ func valueOrDash(value string) string {
 
 func usage(writer io.Writer) {
 	fmt.Fprintln(writer, `Usage:
-	pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
+  pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
+  pm systemd [-config FILE]
   pm [-socket PATH] status [NAME...]
   pm [-socket PATH] list [NAME...]
   pm [-socket PATH] start|stop|restart NAME|all
-  pm [-socket PATH] reload|shutdown
+  pm [-socket PATH] pause|resume|disable|enable NAME|all
+  pm [-socket PATH] reload|shutdown|shundown
   pm [-socket PATH] logs [-n LINES] [-f] [-stderr] NAME
   pm llms.txt
   pm version | pm -v

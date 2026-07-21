@@ -21,7 +21,11 @@ func TestServerLifecycle(t *testing.T) {
 		Restart: "never", RestartDelay: "10ms", MaxRestarts: 2,
 		RestartWindow: "1s", StopSignal: "TERM", StopTimeout: "500ms",
 	}
-	manager := supervisor.New([]config.Program{program})
+	states, err := supervisor.NewProgramStateStore(filepath.Join(dir, supervisor.ProgramStateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := supervisor.NewWithState([]config.Program{program}, nil, states)
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := config.Config{Socket: socket, StateDir: filepath.Join(dir, ".pm"), EventHistory: 1000, Web: config.Web{Enabled: false}}
 	server := NewServer(cfg, configPath, manager, cancel, log.New(io.Discard, "", 0))
@@ -46,11 +50,23 @@ func TestServerLifecycle(t *testing.T) {
 	if !response.OK || len(response.Processes) != 1 || response.Processes[0].State != supervisor.StateRunning || response.Processes[0].PID == firstPID {
 		t.Fatalf("unexpected restarted status: %+v", response)
 	}
+	response = callForTest(t, socket, Request{Action: "pause", Names: []string{"worker"}})
+	if !response.OK {
+		t.Fatal(response.Message)
+	}
+	response = callForTest(t, socket, Request{Action: "status", Names: []string{"worker"}})
+	if !response.OK || !response.Processes[0].Paused || response.Processes[0].State != supervisor.StateStopped {
+		t.Fatalf("unexpected paused status: %+v", response)
+	}
+	response = callForTest(t, socket, Request{Action: "resume", Names: []string{"worker"}})
+	if !response.OK {
+		t.Fatal(response.Message)
+	}
 	response = callForTest(t, socket, Request{Action: "stop", Names: []string{"worker"}})
 	if !response.OK {
 		t.Fatal(response.Message)
 	}
-	response = callForTest(t, socket, Request{Action: "shutdown"})
+	response = callForTest(t, socket, Request{Action: "shundown"})
 	if !response.OK {
 		t.Fatal(response.Message)
 	}

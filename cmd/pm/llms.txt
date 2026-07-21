@@ -13,6 +13,7 @@ console's static assets are embedded in the binary. No telemetry is collected.
 ```bash
 make install            # or: go install ./cmd/pm   (needs Go 1.26+)
 pm daemon -d            # start the daemon in the background (or run under launchd/systemd)
+sudo pm systemd         # Linux: install, enable at boot, and start pm.service
 pm list                 # compact list of managed processes
 pm status               # detailed table (CPU, memory, uptime, restarts, exit)
 ```
@@ -28,6 +29,7 @@ All default data lives under `~/.pm`:
 | `~/.pm/pm.yaml` | configuration (auto-generated on first run) |
 | `~/.pm/pm.sock` | Unix control socket |
 | `~/.pm/events.jsonl` | lifecycle event history |
+| `~/.pm/program-state.json` | persistent pause/disable markers |
 | `~/.pm/logs/pm-daemon.log` | daemon log when started with `-d` |
 | `~/.pm/logs/<name>.log` | a managed process' stdout/stderr (when configured) |
 
@@ -38,11 +40,14 @@ directory takes priority over `~/.pm/pm.yaml` when `-config` is omitted.
 
 ```
 pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
+pm systemd [-config FILE]                    # Linux system service installation (run with sudo)
 pm [-socket PATH] status [NAME...]        # full details for all or named programs
 pm [-socket PATH] list   [NAME...]        # compact overview: NAME GROUP STATE PID UPTIME
 pm [-socket PATH] start|stop|restart NAME|all
+pm [-socket PATH] pause|resume|disable|enable NAME|all
 pm [-socket PATH] reload                  # hot-reload program config from disk
 pm [-socket PATH] shutdown                # stop the daemon (and all managed programs)
+pm [-socket PATH] shundown                # compatibility alias for shutdown
 pm [-socket PATH] logs [-n LINES] [-f] [-stderr] NAME
 pm llms.txt                               # print this guide
 pm version
@@ -50,8 +55,17 @@ pm version
 
 `status` shows full detail (state, PID, CPU, memory, child/descendant process
 counts, Go goroutines when configured, uptime, start count, exit code, last
-error). `list` is a 5-column quick overview. `start`, `stop`,
-`restart` accept several names or the literal `all`.
+error). `list` is a 5-column quick overview. Process actions accept several
+names or the literal `all`. `stop` is temporary: an autostart program starts
+again after a daemon restart. `pause` and `disable` persist their markers and
+prevent autostart; `resume` and `enable` clear the corresponding marker and
+start the program immediately.
+
+On Linux, `sudo pm systemd` installs the current binary as
+`/usr/local/bin/pm`, writes `/etc/systemd/system/pm.service`, enables it at boot,
+and hands an existing daemon over to systemd. The service runs as the original
+sudo user and uses a current-directory `pm.yaml` when present, otherwise that
+user's `~/.pm/pm.yaml`. Pass `-config FILE` to choose another file.
 
 CLI socket resolution order: `-socket PATH` flag → `PM_SOCKET` env → `socket`
 field from the config → `~/.pm/pm.sock`.
@@ -180,6 +194,9 @@ replaces the config via a temp file in the same directory.
 - Tail logs: `pm logs -f -n 200 NAME` (stdout); add `-stderr` for stderr.
 - Check health: `pm list` for a fast scan, `pm status NAME` for detail.
 - Stop everything: `pm stop all`. Stop the daemon: `pm shutdown`.
+- Keep a program stopped across daemon or machine restarts: `pm pause NAME`;
+  use `pm resume NAME` to allow and start it again. Use `disable`/`enable` for
+  the stronger administrative marker.
 - Diagnose a `FATAL` program: `pm status NAME` shows restart count and last
   error; review `~/.pm/logs/<name>.log` and `~/.pm/logs/pm-daemon.log`.
 - Move data: edit `~/.pm/pm.yaml` paths, or run with `-config` pointing
@@ -190,5 +207,6 @@ replaces the config via a temp file in the same directory.
 
 - Stateful data is plain files under `~/.pm`; back up or inspect directly.
 - Long-running deployments should use launchd (macOS) or systemd (Linux), not
-  `-d`. See `deploy/` for templates. When managed by the OS, do not pass `-d`.
+  `-d`. On Linux use `sudo pm systemd`; see `deploy/` for advanced dedicated-user
+  templates. When managed by the OS, do not pass `-d`.
 - `pm llms.txt` works offline and needs no running daemon.

@@ -71,6 +71,8 @@ type Program struct {
 	Directory     string            `json:"directory,omitempty" yaml:"directory,omitempty"`
 	Environment   map[string]string `json:"environment,omitempty" yaml:"environment,omitempty"`
 	Autostart     bool              `json:"autostart" yaml:"autostart"`
+	Paused        bool              `json:"paused,omitempty" yaml:"-"`
+	Disabled      bool              `json:"disabled,omitempty" yaml:"-"`
 	Restart       string            `json:"restart" yaml:"restart"`
 	RestartDelay  string            `json:"restart_delay" yaml:"restart_delay"`
 	MaxRestarts   int               `json:"max_restarts" yaml:"max_restarts"`

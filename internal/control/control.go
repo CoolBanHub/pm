@@ -134,9 +134,25 @@ func (s *Server) dispatch(request Request) (Response, bool) {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
 		return resultMessage("restarted "+targets(request.Names), s.manager.Restart(request.Names)), false
+	case "pause":
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return resultMessage("paused "+targets(request.Names), s.manager.Pause(request.Names)), false
+	case "resume":
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return resultMessage("resumed "+targets(request.Names), s.manager.Resume(request.Names)), false
+	case "disable":
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return resultMessage("disabled "+targets(request.Names), s.manager.Disable(request.Names)), false
+	case "enable":
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return resultMessage("enabled "+targets(request.Names), s.manager.Enable(request.Names)), false
 	case "reload":
 		return s.reload(), false
-	case "shutdown":
+	case "shutdown", "shundown":
 		return Response{OK: true, Message: "daemon is shutting down"}, true
 	default:
 		return Response{OK: false, Message: fmt.Sprintf("unknown action %q", request.Action)}, false

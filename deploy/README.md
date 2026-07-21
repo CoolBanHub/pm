@@ -4,6 +4,18 @@
 
 > macOS 托管见本文末尾的 [launchd 附录](#macos-launchd-附录)。
 
+## 快速安装
+
+普通单用户 Linux 部署可以直接执行：
+
+```bash
+sudo pm systemd
+```
+
+该命令安装当前二进制到 `/usr/local/bin/pm`，生成 `/etc/systemd/system/pm.service`，立即启动并设置开机自启。服务以发起 sudo 的原始用户运行，默认使用当前目录的 `pm.yaml`，否则使用该用户的 `~/.pm/pm.yaml`；可通过 `-config FILE` 显式指定。已运行的 PM daemon 会被平滑停止并交接给 systemd。
+
+下文的手动部署适合需要专用 `pm` 系统用户、`/etc`/`/var` FHS 目录、环境文件或额外 systemd 加固的生产环境。
+
 ## 核心原则：让 systemd 独占守护职责
 
 PM 自带 `-d` 后台模式（自己 fork 进后台、写 `pm-daemon.log`）。**用 systemd 托管时不要加 `-d`**：

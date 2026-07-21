@@ -20,6 +20,16 @@ func TestUsageShowsShortDetachFlag(t *testing.T) {
 	}
 }
 
+func TestUsageShowsSystemdAndPersistentModes(t *testing.T) {
+	var output bytes.Buffer
+	usage(&output)
+	for _, command := range []string{"pm systemd [-config FILE]", "pause|resume|disable|enable"} {
+		if !strings.Contains(output.String(), command) {
+			t.Fatalf("usage does not advertise %q: %q", command, output.String())
+		}
+	}
+}
+
 func TestLoadDaemonConfigUsesDefaultsOnlyWhenOptional(t *testing.T) {
 	path := filepath.Join(t.TempDir(), config.DefaultFile)
 	cfg, err := loadDaemonConfig(path, true)
@@ -151,5 +161,16 @@ func TestRunHelpFlagsPrintUsage(t *testing.T) {
 		if !strings.Contains(output, "Usage:") || !strings.Contains(output, "pm version | pm -v") {
 			t.Fatalf("%s did not print usage: %q", flag, output)
 		}
+	}
+}
+
+func TestRunWithoutArgumentsPrintsUsageAndSucceeds(t *testing.T) {
+	output := captureStdout(t, func() {
+		if err := run(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(output, "Usage:") || !strings.Contains(output, "shutdown|shundown") {
+		t.Fatalf("pm without arguments did not print usage: %q", output)
 	}
 }

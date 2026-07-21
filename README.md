@@ -59,6 +59,20 @@ make install
 
 `-detach` 仍作为兼容别名保留；新部署请使用更简短的 `-d`。长期运行不建议使用后台模式，应该交给 launchd/systemd 托管。
 
+Linux 上可以直接安装为 systemd 系统服务。命令会把当前 PM 二进制安装到 `/usr/local/bin/pm`，生成并启用 `pm.service`，平滑接管已运行的 daemon，并设置开机自启动：
+
+```bash
+sudo ./bin/pm systemd
+```
+
+默认使用当前目录的 `pm.yaml`；当前目录没有配置时使用发起 sudo 的用户的 `~/.pm/pm.yaml`。也可以明确指定配置：
+
+```bash
+sudo ./bin/pm systemd -config /etc/pm/pm.yaml
+```
+
+服务以发起 sudo 的用户身份运行，不会把受管程序意外切换为 root。安装后可用 `systemctl status pm` 和 `journalctl -u pm -f` 查看服务状态与 daemon 日志。
+
 示例配置的管理后台地址为 [http://127.0.0.1:19090](http://127.0.0.1:19090)。后台模式下，守护进程日志写入 `~/.pm/logs/pm-daemon.log`（或配置目录下的 `logs/pm-daemon.log`）。
 
 ## 命令行控制
@@ -71,12 +85,21 @@ CLI 不依赖 HTTP，所有操作都通过 Unix Socket 完成。CLI 会依次使
 ./bin/pm start example-worker
 ./bin/pm stop example-worker
 ./bin/pm restart example-worker
+./bin/pm pause example-worker
+./bin/pm resume example-worker
+./bin/pm disable example-worker
+./bin/pm enable example-worker
 ./bin/pm logs -n 100 -f example-worker
 ./bin/pm reload
 ./bin/pm shutdown
+./bin/pm shundown  # shutdown 的兼容别名
 ```
 
-`status` 会显示状态、PID、CPU、内存、直接子进程、全部后代进程、Go goroutine、运行时间、启动次数和退出信息。`list` 是更精简的概览，仅显示名称、分组、状态、PID 和运行时间。`start`、`stop`、`restart` 接受多个进程名或 `all`。从其他目录管理实例时，可以显式指定 Socket 或使用环境变量：
+`status` 会显示状态、持久化模式、PID、CPU、内存、直接子进程、全部后代进程、Go goroutine、运行时间、启动次数和退出信息。`list` 是更精简的概览，仅显示名称、分组、状态、PID 和运行时间。上述进程操作都接受多个进程名或 `all`。
+
+`stop` 只停止当前运行实例，daemon 或机器重启后仍会按 `autostart` 再次启动。`pause` 和 `disable` 会持久化标记并停止程序，之后 PM 被 systemd 重启也不会拉起它；分别使用 `resume` 和 `enable` 清除标记并立即启动。`autostart: false` 的程序始终只手动启动。
+
+从其他目录管理实例时，可以显式指定 Socket 或使用环境变量：
 
 ```bash
 export PM_SOCKET=/absolute/path/to/run/pm.sock
@@ -174,12 +197,12 @@ Web 后台可以通过“添加进程”和进程详情中的“编辑配置”�
 
 ## 系统托管
 
-长期运行推荐使用系统服务，而不是 `-d`。完整的 Linux systemd 部署指南（目录规划、专用用户、生产配置、单元文件、加固与运维）见 [deploy/README.md](deploy/README.md)。macOS 本机建议使用用户级 launchd `LaunchAgent`，同一文档也包含对应说明。模板位于：
+Linux 单用户部署优先使用 `sudo pm systemd` 自动安装。需要专用系统用户、FHS 目录规划、环境文件或更严格的安全加固时，参照完整的 [systemd 部署指南](deploy/README.md) 手动部署。macOS 本机建议使用用户级 launchd `LaunchAgent`，同一文档也包含对应说明。模板位于：
 
 - macOS: [deploy/launchd/com.local.pm.plist.example](deploy/launchd/com.local.pm.plist.example)
 - Linux: [deploy/systemd/pm.service.example](deploy/systemd/pm.service.example)
 
-替换模板中的二进制、配置文件和工作目录路径后再安装。使用 launchd/systemd 托管时不要加 `-d`，由系统服务负责守护和开机启动。
+手动部署时需替换模板中的二进制、配置文件和工作目录路径。使用 launchd/systemd 托管时不要加 `-d`，由系统服务负责守护和开机启动。systemd 拉起 PM 后，PM 会启动所有 `autostart: true` 且未暂停、未禁用的程序。
 
 ## 数据文件
 
@@ -190,6 +213,7 @@ Web 后台可以通过“添加进程”和进程详情中的“编辑配置”�
 - 进程日志：由每个 program 的 `stdout_log`、`stderr_log` 决定，示例默认在 `~/.pm/logs/`
 - 守护进程日志：后台模式默认 `~/.pm/logs/pm-daemon.log`
 - 事件历史：`~/.pm/events.jsonl`（即 `state_dir/events.jsonl`）
+- 暂停/禁用标记：`~/.pm/program-state.json`（即 `state_dir/program-state.json`）
 - 配置备份：Web 保存配置时生成 `<config>.bak`
 
 PM 不采集或上传遥测数据，Web 静态资源全部内嵌在二进制中。
