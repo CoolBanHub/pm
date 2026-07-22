@@ -196,17 +196,17 @@ $$('th[data-sort]').forEach(th => th.addEventListener('click', () => {
 function rowMarkup(process, animate) {
   return `<tr data-name="${escapeAttr(process.name)}" class="${animate ? 'is-entering' : ''}">
     <td class="check-column"><input type="checkbox" data-select="${escapeAttr(process.name)}" aria-label="选择 ${escapeAttr(process.name)}" ${state.selectedNames.has(process.name) ? 'checked' : ''}></td>
-    <td><button class="process-name" data-detail="${escapeAttr(process.name)}">${escapeHTML(process.name)}</button><span class="process-command">${escapeHTML(commandText(process))}</span></td>
-    <td><button class="group-tag group-button" data-edit-group="${escapeAttr(process.name)}" title="修改分组">${escapeHTML(process.group || 'default')}</button></td>
-    <td class="cell-state">${statusBadge(process.state, '', process.paused)}</td>
-    <td class="num-col cell-pid"><span class="metric">${process.pid || '-'}</span></td>
-    <td class="num-col cell-cpu"><span class="metric">${process.pid ? `${(process.cpu_percent || 0).toFixed(1)}%` : '-'}</span></td>
-    <td class="num-col cell-mem"><span class="metric">${process.pid ? formatBytes(process.memory_bytes || 0) : '-'}</span></td>
-    <td class="num-col cell-children"><span class="metric">${process.pid ? (process.child_processes || 0) : '-'}</span></td>
-    <td class="num-col cell-goroutines"><span class="metric">${process.pid && Number.isInteger(process.goroutines) ? process.goroutines : '-'}</span></td>
-    <td class="num-col cell-up">${escapeHTML(process.uptime || '-')}</td>
-    <td class="num-col cell-restarts">${process.restarts || 0}</td>
-    <td><div class="row-actions">${rowActionButtons(process)}</div></td>
+    <td class="cell-name"><button class="process-name" data-detail="${escapeAttr(process.name)}">${escapeHTML(process.name)}</button><span class="process-command">${escapeHTML(commandText(process))}</span></td>
+    <td class="cell-group" data-label="分组"><button class="group-tag group-button" data-edit-group="${escapeAttr(process.name)}" title="修改分组">${escapeHTML(process.group || 'default')}</button></td>
+    <td class="cell-state" data-label="状态">${statusBadge(process.state, '', process.paused)}</td>
+    <td class="num-col cell-pid" data-label="PID"><span class="metric">${process.pid || '-'}</span></td>
+    <td class="num-col cell-cpu" data-label="CPU"><span class="metric">${process.pid ? `${(process.cpu_percent || 0).toFixed(1)}%` : '-'}</span></td>
+    <td class="num-col cell-mem" data-label="内存"><span class="metric">${process.pid ? formatBytes(process.memory_bytes || 0) : '-'}</span></td>
+    <td class="num-col cell-children" data-label="子进程"><span class="metric">${process.pid ? (process.child_processes || 0) : '-'}</span></td>
+    <td class="num-col cell-goroutines" data-label="协程"><span class="metric">${process.pid && Number.isInteger(process.goroutines) ? process.goroutines : '-'}</span></td>
+    <td class="num-col cell-up" data-label="运行时间">${escapeHTML(process.uptime || '-')}</td>
+    <td class="num-col cell-restarts" data-label="重启">${process.restarts || 0}</td>
+    <td class="cell-actions"><div class="row-actions">${rowActionButtons(process)}</div></td>
   </tr>`;
 }
 function renderSkeleton() {

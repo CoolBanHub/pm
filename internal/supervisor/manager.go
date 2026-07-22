@@ -474,6 +474,49 @@ func (m *Manager) Restart(names []string) error {
 	})
 }
 
+// RestartConfigured restarts the selected processes with their current
+// definitions from the configuration file. All targets are validated before
+// any running process is stopped.
+func (m *Manager) RestartConfigured(names []string, programs []config.Program) error {
+	programs = m.states.Apply(programs)
+	configured := make(map[string]config.Program, len(programs))
+	for _, program := range programs {
+		configured[program.Name] = program
+	}
+	selected, err := m.selectProcesses(names)
+	if err != nil {
+		return err
+	}
+	type target struct {
+		process *Process
+		program config.Program
+	}
+	targets := make([]target, 0, len(selected))
+	for _, process := range selected {
+		name := process.Status().Name
+		program, exists := configured[name]
+		if !exists {
+			return fmt.Errorf("program %q is no longer configured; run pm reload", name)
+		}
+		targets = append(targets, target{process: process, program: program})
+	}
+
+	var errs []error
+	for _, item := range targets {
+		if err := item.process.Stop(); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		item.process.mu.Lock()
+		item.process.config = item.program
+		item.process.mu.Unlock()
+		if err := item.process.Start(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (m *Manager) Pause(names []string) error {
 	return m.setMode(names, func(mode ProgramMode) ProgramMode {
 		mode.Paused = true

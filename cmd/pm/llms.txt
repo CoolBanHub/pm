@@ -64,6 +64,11 @@ again after a daemon restart. `pause` and `disable` persist their markers and
 prevent autostart; `resume` and `enable` clear the corresponding marker and
 start the program immediately.
 
+`restart` validates and re-reads `pm.yaml` before stopping the selected
+programs, so changes to environment variables, arguments, and log paths take
+effect on the new process. An invalid configuration leaves the running process
+untouched. Use `reload` to add or remove programs.
+
 On Linux, `sudo pm systemd` installs the current binary as
 `/usr/local/bin/pm`, writes `/etc/systemd/system/pm.service`, enables it at boot,
 and hands an existing daemon over to systemd. The service runs as the original

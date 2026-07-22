@@ -131,9 +131,7 @@ func (s *Server) dispatch(request Request) (Response, bool) {
 		defer s.mu.RUnlock()
 		return resultMessage("stopped "+targets(request.Names), s.manager.Stop(request.Names)), false
 	case "restart":
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		return resultMessage("restarted "+targets(request.Names), s.manager.Restart(request.Names)), false
+		return s.restart(request.Names), false
 	case "pause":
 		s.mu.RLock()
 		defer s.mu.RUnlock()
@@ -175,13 +173,9 @@ func (s *Server) ConfigPath() string {
 }
 
 func (s *Server) reload() Response {
-	cfg, err := config.Load(s.configPath)
+	cfg, err := s.loadRuntimeConfig()
 	if err != nil {
 		return Response{OK: false, Message: err.Error()}
-	}
-	config.ResolvePaths(&cfg, s.configPath)
-	if cfg.Socket != s.runtime.Socket || cfg.StateDir != s.runtime.StateDir || cfg.EventHistory != s.runtime.EventHistory || cfg.Web != s.runtime.Web {
-		return Response{OK: false, Message: "socket, web, state_dir, and event_history changes require a daemon restart"}
 	}
 
 	s.mu.Lock()
@@ -192,6 +186,28 @@ func (s *Server) reload() Response {
 	}
 	s.mu.Unlock()
 	return Response{OK: true, Message: "configuration reloaded"}
+}
+
+func (s *Server) restart(names []string) Response {
+	cfg, err := s.loadRuntimeConfig()
+	if err != nil {
+		return Response{OK: false, Message: err.Error()}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return resultMessage("restarted "+targets(names), s.manager.RestartConfigured(names, cfg.Programs))
+}
+
+func (s *Server) loadRuntimeConfig() (config.Config, error) {
+	cfg, err := config.Load(s.configPath)
+	if err != nil {
+		return config.Config{}, err
+	}
+	config.ResolvePaths(&cfg, s.configPath)
+	if cfg.Socket != s.runtime.Socket || cfg.StateDir != s.runtime.StateDir || cfg.EventHistory != s.runtime.EventHistory || cfg.Web != s.runtime.Web {
+		return config.Config{}, errors.New("socket, web, state_dir, and event_history changes require a daemon restart")
+	}
+	return cfg, nil
 }
 
 func (s *Server) Manager() *supervisor.Manager {

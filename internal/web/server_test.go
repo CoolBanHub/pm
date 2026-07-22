@@ -228,17 +228,29 @@ func TestPauseAndResumeProcessActions(t *testing.T) {
 }
 
 func TestLogTailEndpoint(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "app.log")
-	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+	dir := t.TempDir()
+	stdoutPath := filepath.Join(dir, "app.log")
+	stderrPath := filepath.Join(dir, "app.error.log")
+	if err := os.WriteFile(stdoutPath, []byte("one\ntwo\nthree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	backend := &fakeBackend{statuses: []supervisor.Status{{Name: "api", State: supervisor.StateRunning, StdoutLog: path}}}
+	if err := os.WriteFile(stderrPath, []byte("stderr-only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeBackend{statuses: []supervisor.Status{{Name: "api", State: supervisor.StateRunning, StdoutLog: stdoutPath, StderrLog: stderrPath}}}
 	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/logs/api?tail=2", nil)
 	recorder := httptest.NewRecorder()
 	server.routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "two\\nthree") {
 		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/logs/api?stream=stderr", nil)
+	recorder = httptest.NewRecorder()
+	server.routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "stderr-only") || strings.Contains(recorder.Body.String(), "three") {
+		t.Fatalf("stderr response = %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 

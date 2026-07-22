@@ -64,6 +64,29 @@ func TestProcessWritesLog(t *testing.T) {
 	}
 }
 
+func TestProcessSeparatesStdoutAndStderr(t *testing.T) {
+	dir := t.TempDir()
+	program := testProgram("logger", "printf stdout-message; printf stderr-message >&2")
+	program.StdoutLog = filepath.Join(dir, "stdout.log")
+	program.StderrLog = filepath.Join(dir, "stderr.log")
+	p := NewProcess(program)
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool { return p.Status().State == StateExited })
+	stdout, err := os.ReadFile(program.StdoutLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := os.ReadFile(program.StderrLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdout) != "stdout-message" || string(stderr) != "stderr-message" {
+		t.Fatalf("stdout = %q, stderr = %q", stdout, stderr)
+	}
+}
+
 func TestManagerApplyOnlyRestartsChangedProcesses(t *testing.T) {
 	first := testProgram("first", "sleep 30")
 	first.Group = "workers"
