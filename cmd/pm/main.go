@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/CoolBanHub/pm/internal/config"
@@ -386,8 +385,9 @@ func listCommand(socket string, names []string) error {
 }
 
 func printStatuses(statuses []supervisor.Status) {
-	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "NAME\tGROUP\tSTATE\tMODE\tPID\tCPU\tMEMORY\tCHILDREN\tDESCENDANTS\tGOROUTINES\tUPTIME\tSTARTS\tEXIT\tDETAIL")
+	rows := [][]string{
+		{"NAME", "GROUP", "STATE", "MODE", "PID", "CPU", "MEMORY", "CHILDREN", "DESCENDANTS", "GOROUTINES", "UPTIME", "STARTS", "EXIT", "DETAIL"},
+	}
 	for _, status := range statuses {
 		pid, cpu, memory, children, descendants, goroutines, exit := "-", "-", "-", "-", "-", "-", "-"
 		mode := "enabled"
@@ -418,24 +418,31 @@ func printStatuses(statuses []supervisor.Status) {
 			}
 			detail += fmt.Sprintf("restarts=%d", status.Restarts)
 		}
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n", status.Name, status.Group, status.State, mode, pid, cpu, memory, children, descendants, goroutines, valueOrDash(status.Uptime), status.Starts, exit, detail)
+		rows = append(rows, []string{
+			status.Name, status.Group, status.State, mode, pid, cpu, memory, children, descendants, goroutines, valueOrDash(status.Uptime), strconv.Itoa(status.Starts), exit, detail,
+		})
 	}
-	_ = writer.Flush()
+	fmt.Print(renderTable(rows))
 }
 
 // printList renders a compact overview of managed processes. Unlike
-// printStatuses it omits CPU, memory, restart and exit detail for a quick scan.
+// printStatuses it omits CPU, memory, restart and exit detail for a quick scan,
+// and appends a DESCRIPTION column for at-a-glance notes.
 func printList(statuses []supervisor.Status) {
-	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "NAME\tGROUP\tSTATE\tPID\tUPTIME")
+	const descriptionWidth = 40
+	rows := [][]string{
+		{"NAME", "GROUP", "STATE", "PID", "UPTIME", "DESCRIPTION"},
+	}
 	for _, status := range statuses {
 		pid := "-"
 		if status.PID != 0 {
 			pid = strconv.Itoa(status.PID)
 		}
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", status.Name, status.Group, status.State, pid, valueOrDash(status.Uptime))
+		rows = append(rows, []string{
+			status.Name, status.Group, status.State, pid, valueOrDash(status.Uptime), truncate(status.Description, descriptionWidth),
+		})
 	}
-	_ = writer.Flush()
+	fmt.Print(renderTable(rows))
 }
 
 func formatBytes(value int64) string {

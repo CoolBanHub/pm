@@ -22,6 +22,8 @@ web:
 # 默认为空；如需托管进程，按下面的样例添加。
 programs: []
   # - name: example-worker
+  #   # 可选：进程用途/备注，便于在列表与 Web 后台识别。
+  #   description: 示例进程：每 5 秒打印一次心跳
   #   group: workers
   #   command: /bin/sh
   #   # command 不经过 shell；需要管道/重定向/循环时显式调用 sh -c。

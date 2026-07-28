@@ -115,7 +115,8 @@ load and on web edits; the daemon refuses to start on invalid config.
 
 | Field | Meaning | Default |
 | --- | --- | --- |
-| `name` | unique program name; no whitespace | required |
+| `name` | unique program name; no whitespace (Unicode such as CJK is allowed) | required |
+| `description` | optional note/summary; no newlines, max 256 chars | empty |
 | `group` | grouping for filtering | `default` |
 | `command` | executable; NOT parsed by a shell | required |
 | `args` | argument list | `[]` |
@@ -158,6 +159,7 @@ web:
 
 programs:
   - name: example-worker
+    description: example program printing a heartbeat every 5s
     group: workers
     command: /bin/sh
     args: ["-c", 'while true; do echo "tick $(date)"; sleep 5; done']

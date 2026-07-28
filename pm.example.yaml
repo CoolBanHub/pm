@@ -21,6 +21,7 @@ web:
 # 受管进程列表。每个条目省略的字段会使用默认值，见 README 字段表。
 programs:
   - name: example-worker
+    description: 示例进程：每 5 秒打印一次心跳
     group: workers
     command: /bin/sh
     # command 不经过 shell；需要管道/重定向/循环时显式调用 sh -c。

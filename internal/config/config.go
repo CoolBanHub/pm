@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -66,6 +67,7 @@ type Web struct {
 type Program struct {
 	Name          string            `json:"name" yaml:"name"`
 	Group         string            `json:"group" yaml:"group"`
+	Description   string            `json:"description,omitempty" yaml:"description,omitempty"`
 	Command       string            `json:"command" yaml:"command"`
 	Args          []string          `json:"args,omitempty" yaml:"args,omitempty"`
 	Directory     string            `json:"directory,omitempty" yaml:"directory,omitempty"`
@@ -244,6 +246,12 @@ func (c Config) Validate() error {
 		}
 		if len(p.Group) > 64 || strings.ContainsAny(p.Group, "\r\n\t") {
 			return fmt.Errorf("%s.group must be at most 64 characters without control whitespace", prefix)
+		}
+		if strings.ContainsAny(p.Description, "\r\n\t") {
+			return fmt.Errorf("%s.description cannot contain newlines or tabs", prefix)
+		}
+		if utf8.RuneCountInString(p.Description) > 256 {
+			return fmt.Errorf("%s.description must be at most 256 characters", prefix)
 		}
 		if _, exists := names[p.Name]; exists {
 			return fmt.Errorf("duplicate program name %q", p.Name)

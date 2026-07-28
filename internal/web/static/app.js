@@ -196,7 +196,7 @@ $$('th[data-sort]').forEach(th => th.addEventListener('click', () => {
 function rowMarkup(process, animate) {
   return `<tr data-name="${escapeAttr(process.name)}" class="${animate ? 'is-entering' : ''}">
     <td class="check-column"><input type="checkbox" data-select="${escapeAttr(process.name)}" aria-label="选择 ${escapeAttr(process.name)}" ${state.selectedNames.has(process.name) ? 'checked' : ''}></td>
-    <td class="cell-name"><button class="process-name" data-detail="${escapeAttr(process.name)}">${escapeHTML(process.name)}</button><span class="process-command">${escapeHTML(commandText(process))}</span></td>
+    <td class="cell-name"><button class="process-name" data-detail="${escapeAttr(process.name)}">${escapeHTML(process.name)}</button>${process.description ? `<span class="process-description">${escapeHTML(process.description)}</span>` : ''}<span class="process-command">${escapeHTML(commandText(process))}</span></td>
     <td class="cell-group" data-label="分组"><button class="group-tag group-button" data-edit-group="${escapeAttr(process.name)}" title="修改分组">${escapeHTML(process.group || 'default')}</button></td>
     <td class="cell-state" data-label="状态">${statusBadge(process.state, '', process.paused)}</td>
     <td class="num-col cell-pid" data-label="PID"><span class="metric">${process.pid || '-'}</span></td>
@@ -611,6 +611,7 @@ function closeProcessForm() { $('#process-modal').classList.add('hidden'); state
 
 function fillProcessForm(program) {
   $('#process-name').value = program.name || '';
+  $('#process-description').value = program.description || '';
   $('#process-group').value = program.group || 'default';
   $('#process-command').value = program.command || '';
   $('#process-args').value = (program.args || []).join('\n');
@@ -639,7 +640,7 @@ function processFormValue() {
     environment[line.slice(0, separator).trim()] = line.slice(separator + 1);
   }
   return {
-    name: $('#process-name').value.trim(), group: $('#process-group').value.trim(), command: $('#process-command').value.trim(),
+    name: $('#process-name').value.trim(), description: $('#process-description').value.trim(), group: $('#process-group').value.trim(), command: $('#process-command').value.trim(),
     args: $('#process-args').value.split('\n').map(value => value.trim()).filter(Boolean),
     directory: $('#process-directory').value.trim(), environment, autostart: $('#process-autostart').checked,
     restart: $('#process-restart').value, restart_delay: $('#process-restart-delay').value.trim(),

@@ -209,6 +209,7 @@
       </header>
       <div class="process-form-body">
         <div class="form-field"><label for="process-name">进程名称</label><input id="process-name" required pattern="[^\s]+"></div>
+        <div class="form-field wide"><label for="process-description">描述</label><input id="process-description" placeholder="可选：进程用途/备注" maxlength="256"></div>
         <div class="form-field"><label for="process-group">所属分组</label><input id="process-group" list="group-options" value="default" required><datalist id="group-options"></datalist></div>
         <div class="form-field wide"><label for="process-command">启动命令</label><input id="process-command" required placeholder="/absolute/path/to/app"></div>
         <div class="form-field wide"><label for="process-args">参数</label><textarea id="process-args" rows="4" placeholder="每行一个参数"></textarea></div>

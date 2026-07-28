@@ -28,6 +28,7 @@ const (
 type Status struct {
 	Name        string    `json:"name"`
 	Group       string    `json:"group"`
+	Description string    `json:"description,omitempty"`
 	State       string    `json:"state"`
 	PID         int       `json:"pid,omitempty"`
 	Uptime      string    `json:"uptime,omitempty"`
@@ -297,25 +298,26 @@ func (p *Process) Status() Status {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	status := Status{
-		Name:      p.config.Name,
-		Group:     p.config.Group,
-		State:     p.state,
-		Starts:    p.starts,
-		Restarts:  p.restarts,
-		ExitCode:  p.exitCode,
-		LastError: p.lastError,
-		StartedAt: p.startedAt,
-		ExitedAt:  p.exitedAt,
-		StdoutLog: p.config.StdoutLog,
-		StderrLog: p.config.StderrLog,
-		Command:   p.config.Command,
-		Args:      append([]string(nil), p.config.Args...),
-		Directory: p.config.Directory,
-		Autostart: p.config.Autostart,
-		Paused:    p.config.Paused,
-		Disabled:  p.config.Disabled,
-		Restart:   p.config.Restart,
-		PprofURL:  p.config.PprofURL,
+		Name:        p.config.Name,
+		Group:       p.config.Group,
+		Description: p.config.Description,
+		State:       p.state,
+		Starts:      p.starts,
+		Restarts:    p.restarts,
+		ExitCode:    p.exitCode,
+		LastError:   p.lastError,
+		StartedAt:   p.startedAt,
+		ExitedAt:    p.exitedAt,
+		StdoutLog:   p.config.StdoutLog,
+		StderrLog:   p.config.StderrLog,
+		Command:     p.config.Command,
+		Args:        append([]string(nil), p.config.Args...),
+		Directory:   p.config.Directory,
+		Autostart:   p.config.Autostart,
+		Paused:      p.config.Paused,
+		Disabled:    p.config.Disabled,
+		Restart:     p.config.Restart,
+		PprofURL:    p.config.PprofURL,
 	}
 	if p.command != nil && p.command.Process != nil {
 		status.PID = p.command.Process.Pid

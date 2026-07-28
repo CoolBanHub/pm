@@ -369,6 +369,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 .process-name { color: var(--ink); font-weight: 620; border: 0; padding: 0; background: none; text-align: left; max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-size: 13.5px; transition: color .15s; }
 .process-name:hover { color: var(--accent); }
 .process-command { display: block; color: var(--faint); font-size: 11px; margin-top: 3px; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; }
+.process-description { display: block; color: var(--faint); font-size: 11px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }
 .metric { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
 .group-tag { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); background: var(--surface-2); font-size: 11px; font-weight: 500; }
 
