@@ -2,6 +2,28 @@
 
 PM 是一个面向 macOS/Linux 本机环境的进程管理工具。它由常驻守护进程、Unix Socket 控制端和可选的内嵌 Web 管理后台组成，单个 Go 二进制即可运行，不依赖数据库、Node.js 或外部 Web 服务。
 
+## 安装
+
+macOS / Linux 一键安装（下载最新 Release，自动校验 SHA-256 后写入 `pm` 二进制，不启动守护进程、不改配置）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CoolBanHub/pm/main/install.sh | sh
+```
+
+默认装到 `/usr/local/bin`；该目录不可写且无法 sudo 时自动回退到 `~/.local/bin` 并提示加入 PATH。安装到系统目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CoolBanHub/pm/main/install.sh | sudo sh
+```
+
+指定安装目录或版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CoolBanHub/pm/main/install.sh | sh -s -- --install-dir ~/.local/bin --version v0.0.7
+```
+
+首次安装后，后续升级用内置的 `pm update`。访问 GitHub 不畅时可设置代理：`export https_proxy=http://127.0.0.1:7897`。从源码构建见下文「构建」。
+
 ## 能力
 
 - 进程启动、停止、重启、批量操作和状态查询
