@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -386,10 +387,10 @@ func listCommand(socket string, names []string) error {
 
 func printStatuses(statuses []supervisor.Status) {
 	rows := [][]string{
-		{"NAME", "GROUP", "STATE", "MODE", "PID", "CPU", "MEMORY", "CHILDREN", "DESCENDANTS", "GOROUTINES", "UPTIME", "STARTS", "EXIT", "DETAIL"},
+		{"NAME", "GROUP", "STATE", "MODE", "PID", "TCP PORTS", "CPU", "MEMORY", "CHILDREN", "DESCENDANTS", "GOROUTINES", "UPTIME", "STARTS", "EXIT", "DETAIL"},
 	}
 	for _, status := range statuses {
-		pid, cpu, memory, children, descendants, goroutines, exit := "-", "-", "-", "-", "-", "-", "-"
+		pid, tcpPorts, cpu, memory, children, descendants, goroutines, exit := "-", "-", "-", "-", "-", "-", "-", "-"
 		mode := "enabled"
 		if status.Disabled {
 			mode = "disabled"
@@ -400,6 +401,7 @@ func printStatuses(statuses []supervisor.Status) {
 		}
 		if status.PID != 0 {
 			pid = strconv.Itoa(status.PID)
+			tcpPorts = formatTCPPorts(status.TCPPorts)
 			cpu = fmt.Sprintf("%.1f%%", status.CPU)
 			memory = formatBytes(status.Memory)
 			children = strconv.Itoa(status.Children)
@@ -419,7 +421,7 @@ func printStatuses(statuses []supervisor.Status) {
 			detail += fmt.Sprintf("restarts=%d", status.Restarts)
 		}
 		rows = append(rows, []string{
-			status.Name, status.Group, status.State, mode, pid, cpu, memory, children, descendants, goroutines, valueOrDash(status.Uptime), strconv.Itoa(status.Starts), exit, detail,
+			status.Name, status.Group, status.State, mode, pid, tcpPorts, cpu, memory, children, descendants, goroutines, valueOrDash(status.Uptime), strconv.Itoa(status.Starts), exit, detail,
 		})
 	}
 	fmt.Print(renderTable(rows))
@@ -431,7 +433,7 @@ func printStatuses(statuses []supervisor.Status) {
 func printList(statuses []supervisor.Status) {
 	const descriptionWidth = 40
 	rows := [][]string{
-		{"NAME", "GROUP", "STATE", "PID", "UPTIME", "DESCRIPTION"},
+		{"NAME", "GROUP", "STATE", "PID", "TCP PORTS", "UPTIME", "DESCRIPTION"},
 	}
 	for _, status := range statuses {
 		pid := "-"
@@ -439,10 +441,21 @@ func printList(statuses []supervisor.Status) {
 			pid = strconv.Itoa(status.PID)
 		}
 		rows = append(rows, []string{
-			status.Name, status.Group, status.State, pid, valueOrDash(status.Uptime), truncate(status.Description, descriptionWidth),
+			status.Name, status.Group, status.State, pid, formatTCPPorts(status.TCPPorts), valueOrDash(status.Uptime), truncate(status.Description, descriptionWidth),
 		})
 	}
 	fmt.Print(renderTable(rows))
+}
+
+func formatTCPPorts(ports []int) string {
+	if len(ports) == 0 {
+		return "-"
+	}
+	values := make([]string, len(ports))
+	for i, port := range ports {
+		values[i] = strconv.Itoa(port)
+	}
+	return strings.Join(values, ",")
 }
 
 func formatBytes(value int64) string {

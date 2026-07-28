@@ -79,3 +79,12 @@ func TestTruncate(t *testing.T) {
 		t.Errorf("truncated width %d exceeds limit 9", w)
 	}
 }
+
+func TestFormatTCPPorts(t *testing.T) {
+	if got := formatTCPPorts([]int{443, 8080, 9000}); got != "443,8080,9000" {
+		t.Fatalf("formatTCPPorts = %q", got)
+	}
+	if got := formatTCPPorts(nil); got != "-" {
+		t.Fatalf("formatTCPPorts(nil) = %q", got)
+	}
+}

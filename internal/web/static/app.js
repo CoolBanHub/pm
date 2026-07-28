@@ -143,7 +143,7 @@ $$('.stat-card[data-state]').forEach(card => card.addEventListener('click', () =
 function visibleProcesses() {
   const query = state.query.toLowerCase();
   return state.processes.filter(process => {
-    const searchable = `${process.name} ${process.group || 'default'} ${process.command} ${(process.args || []).join(' ')}`.toLowerCase();
+    const searchable = `${process.name} ${process.group || 'default'} ${process.command} ${(process.args || []).join(' ')} ${(process.tcp_ports || []).join(' ')}`.toLowerCase();
     const category = process.state === 'RUNNING' ? 'running' : process.state === 'FATAL' ? 'failed' : 'stopped';
     return (!query || searchable.includes(query)) && (state.filter === 'all' || state.filter === category) && (state.groupFilter === 'all' || process.group === state.groupFilter);
   });
@@ -167,6 +167,7 @@ function sortProcesses(list) {
       case 'children': va = a.child_processes || 0; vb = b.child_processes || 0; break;
       case 'goroutines': va = a.goroutines ?? -1; vb = b.goroutines ?? -1; break;
       case 'pid': va = a.pid || 0; vb = b.pid || 0; break;
+      case 'ports': va = a.tcp_ports?.[0] ?? -1; vb = b.tcp_ports?.[0] ?? -1; break;
       case 'restarts': va = a.restarts || 0; vb = b.restarts || 0; break;
       case 'uptime': va = processAgeSec(a); vb = processAgeSec(b); break;
       case 'group': va = (a.group || 'default').toLowerCase(); vb = (b.group || 'default').toLowerCase(); break;
@@ -200,6 +201,7 @@ function rowMarkup(process, animate) {
     <td class="cell-group" data-label="分组"><button class="group-tag group-button" data-edit-group="${escapeAttr(process.name)}" title="修改分组">${escapeHTML(process.group || 'default')}</button></td>
     <td class="cell-state" data-label="状态">${statusBadge(process.state, '', process.paused)}</td>
     <td class="num-col cell-pid" data-label="PID"><span class="metric">${process.pid || '-'}</span></td>
+    <td class="cell-ports" data-label="TCP 端口" title="TCP 监听端口：${escapeAttr(formatTCPPorts(process.tcp_ports))}"><span class="metric">${escapeHTML(formatTCPPorts(process.tcp_ports))}</span></td>
     <td class="num-col cell-cpu" data-label="CPU"><span class="metric">${process.pid ? `${(process.cpu_percent || 0).toFixed(1)}%` : '-'}</span></td>
     <td class="num-col cell-mem" data-label="内存"><span class="metric">${process.pid ? formatBytes(process.memory_bytes || 0) : '-'}</span></td>
     <td class="num-col cell-children" data-label="子进程"><span class="metric">${process.pid ? (process.child_processes || 0) : '-'}</span></td>
@@ -213,7 +215,7 @@ function renderSkeleton() {
   $('#process-count').textContent = '加载中…';
   $('#empty-state').classList.add('hidden');
   $('#process-list').innerHTML = Array.from({ length: 6 }).map(() =>
-    `<tr class="skeleton-row"><td class="check-column"></td>${Array.from({ length: 11 }).map(() => '<td><span class="skeleton-cell">&nbsp;</span></td>').join('')}</tr>`
+    `<tr class="skeleton-row"><td class="check-column"></td>${Array.from({ length: 12 }).map(() => '<td><span class="skeleton-cell">&nbsp;</span></td>').join('')}</tr>`
   ).join('');
 }
 function renderProcesses() {
@@ -247,6 +249,9 @@ function updateRowsInPlace(processes) {
     if (!row || row.dataset.name !== p.name) continue;
     const setHTML = (sel, html) => { const el = row.querySelector(sel); if (el) el.innerHTML = html; };
     setHTML('.cell-pid', `<span class="metric">${p.pid || '-'}</span>`);
+    const ports = formatTCPPorts(p.tcp_ports);
+    setHTML('.cell-ports', `<span class="metric">${escapeHTML(ports)}</span>`);
+    const portsCell = row.querySelector('.cell-ports'); if (portsCell) portsCell.title = `TCP 监听端口：${ports}`;
     setHTML('.cell-cpu', `<span class="metric">${p.pid ? `${(p.cpu_percent || 0).toFixed(1)}%` : '-'}</span>`);
     setHTML('.cell-mem', `<span class="metric">${p.pid ? formatBytes(p.memory_bytes || 0) : '-'}</span>`);
     setHTML('.cell-children', `<span class="metric">${p.pid ? (p.child_processes || 0) : '-'}</span>`);
@@ -452,7 +457,7 @@ function renderDrawer() {
   $('#drawer-title').textContent = p.name; $('#drawer-state').outerHTML = statusBadge(p.state, 'drawer-state', p.paused);
   $('#tab-overview').innerHTML = `<div class="detail-grid">
     ${detail('状态', p.state)}${detail('所属分组', p.group || 'default')}${detail('PID', p.pid || '-')}${detail('CPU', p.pid ? `${(p.cpu_percent || 0).toFixed(1)}%` : '-')}${detail('内存', p.pid ? formatBytes(p.memory_bytes || 0) : '-')}
-    ${detail('直接子进程', p.pid ? (p.child_processes || 0) : '-')}${detail('全部后代进程', p.pid ? (p.descendant_processes || 0) : '-')}${detail('Go 协程', p.pid && Number.isInteger(p.goroutines) ? p.goroutines : '-')}
+    ${detail('TCP 监听端口', p.pid ? formatTCPPorts(p.tcp_ports) : '-')}${detail('直接子进程', p.pid ? (p.child_processes || 0) : '-')}${detail('全部后代进程', p.pid ? (p.descendant_processes || 0) : '-')}${detail('Go 协程', p.pid && Number.isInteger(p.goroutines) ? p.goroutines : '-')}
     ${detail('运行时间', p.uptime || '-')}${detail('启动次数', p.starts)}${detail('重启次数', p.restarts)}${detail('重启策略', p.restart_policy)}
     ${detail('命令', commandText(p), true)}${detail('工作目录', p.directory || '-', true)}${detail('标准输出', p.stdout_log || '未配置', true)}${detail('标准错误', p.stderr_log || '未配置', true)}
     ${p.last_error ? detail('最近错误', p.last_error, true) : ''}</div>`;
@@ -740,6 +745,7 @@ function statusBadge(status, id = '', paused = false) {
 }
 function detail(label, value, wide = false) { return `<div class="detail-item ${wide ? 'wide' : ''}"><span>${label}</span><code>${escapeHTML(String(value ?? '-'))}</code></div>`; }
 function commandText(p) { return [p.command, ...(p.args || [])].join(' '); }
+function formatTCPPorts(ports) { return ports?.length ? ports.join(', ') : '-'; }
 function formatBytes(bytes) {
   if (!bytes) return '0 B'; const units = ['B', 'KB', 'MB', 'GB']; let value = bytes, unit = 0;
   while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }

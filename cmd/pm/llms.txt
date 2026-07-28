@@ -45,7 +45,7 @@ pm [-socket PATH] up [-config FILE] [-d] [-log FILE]  # alias for daemon
 pm systemd [-config FILE]                    # Linux system service installation (run with sudo)
 pm update                                      # download and install latest GitHub release
 pm [-socket PATH] status [NAME...]        # full details for all or named programs
-pm [-socket PATH] list   [NAME...]        # compact overview: NAME GROUP STATE PID UPTIME
+pm [-socket PATH] list   [NAME...]        # compact overview including PID, TCP ports and uptime
 pm [-socket PATH] start|stop|restart NAME|all
 pm [-socket PATH] pause|resume|disable|enable NAME|all
 pm [-socket PATH] reload                  # hot-reload program config from disk
@@ -56,9 +56,9 @@ pm llms.txt                               # print this guide
 pm version
 ```
 
-`status` shows full detail (state, PID, CPU, memory, child/descendant process
-counts, Go goroutines when configured, uptime, start count, exit code, last
-error). `list` is a 5-column quick overview. Process actions accept several
+`status` shows full detail (state, PID, TCP listening ports, CPU, memory,
+child/descendant process counts, Go goroutines when configured, uptime, start
+count, exit code, last error). `list` is a compact quick overview. Process actions accept several
 names or the literal `all`. `stop` is temporary: an autostart program starts
 again after a daemon restart. `pause` and `disable` persist their markers and
 prevent autostart; `resume` and `enable` clear the corresponding marker and
@@ -136,7 +136,9 @@ load and on web edits; the daemon refuses to start on invalid config.
 | `pprof_url` | Go pprof base URL for goroutine count | empty (disabled) |
 
 Child and descendant counts are collected automatically from OS process
-relationships. For a Go program, expose `net/http/pprof` on a loopback-only
+relationships. TCP metrics contain only listening ports and include sockets
+owned by the managed process or any of its descendants. For a Go program,
+expose `net/http/pprof` on a loopback-only
 listener and set, for example,
 `pprof_url: http://127.0.0.1:6060/debug/pprof`. PM reads the goroutine profile
 with a 750ms timeout. Do not expose pprof directly to the public internet.

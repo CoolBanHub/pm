@@ -49,6 +49,7 @@ type Status struct {
 	Restart     string    `json:"restart_policy"`
 	CPU         float64   `json:"cpu_percent"`
 	Memory      int64     `json:"memory_bytes"`
+	TCPPorts    []int     `json:"tcp_ports,omitempty"`
 	Children    int       `json:"child_processes"`
 	Descendants int       `json:"descendant_processes"`
 	Goroutines  *int      `json:"goroutines,omitempty"`

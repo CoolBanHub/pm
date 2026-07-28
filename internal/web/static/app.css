@@ -320,7 +320,7 @@ select {
 .selection-bar strong { font-size: 12px; }
 
 .table-wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+table { width: 100%; min-width: 1180px; border-collapse: collapse; table-layout: fixed; }
 thead { position: sticky; top: 0; z-index: 2; }
 th {
   height: 40px;
@@ -360,9 +360,9 @@ tbody tr:last-child td { border-bottom: 0; }
 tbody tr { transition: background-color .12s; }
 tbody tr:hover { background: var(--surface-hover); }
 .check-column { width: 42px; text-align: center; }
-th:nth-child(2) { width: 18%; } th:nth-child(3) { width: 8%; } th:nth-child(4) { width: 9%; }
-th:nth-child(5), th:nth-child(6), th:nth-child(8), th:nth-child(9), th:nth-child(11) { width: 6%; }
-th:nth-child(7) { width: 8%; } th:nth-child(10) { width: 9%; } th:last-child { width: 14%; }
+th:nth-child(2) { width: 17%; } th:nth-child(3) { width: 7%; } th:nth-child(4) { width: 8%; }
+th:nth-child(5), th:nth-child(7), th:nth-child(9), th:nth-child(10), th:nth-child(12) { width: 5%; }
+th:nth-child(6) { width: 10%; } th:nth-child(8) { width: 7%; } th:nth-child(11) { width: 8%; } th:last-child { width: 14%; }
 td.check-column { text-align: center; }
 input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 
@@ -565,14 +565,15 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
   .cell-state { order: 2; flex-shrink: 0; }
   /* group + metrics flow and wrap into labeled chips (never shrink/clip) */
   .cell-group { order: 8; flex-shrink: 0; }
-  .cell-pid, .cell-cpu, .cell-mem, .cell-children, .cell-goroutines, .cell-up, .cell-restarts { order: 9; flex-shrink: 0; }
+  .cell-pid, .cell-ports, .cell-cpu, .cell-mem, .cell-children, .cell-goroutines, .cell-up, .cell-restarts { order: 9; flex-shrink: 0; }
+  .cell-ports { max-width: 100%; white-space: normal; }
   /* actions claim the last row */
   .cell-actions { order: 20; flex-basis: 100%; }
   .row-actions { flex-wrap: wrap; }
 
   /* labels in front of labeled cells */
   .cell-group::before, .cell-state::before,
-  .cell-pid::before, .cell-cpu::before, .cell-mem::before,
+  .cell-pid::before, .cell-ports::before, .cell-cpu::before, .cell-mem::before,
   .cell-children::before, .cell-goroutines::before, .cell-up::before, .cell-restarts::before {
     content: attr(data-label);
     color: var(--faint);
@@ -594,7 +595,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
   .skeleton-row { gap: 10px 16px; }
   .skeleton-row td { display: none; }
   .skeleton-row td:nth-child(2), .skeleton-row td:nth-child(6),
-  .skeleton-row td:nth-child(7), .skeleton-row td:nth-child(11) { display: block; flex: 1 1 100%; }
+  .skeleton-row td:nth-child(8), .skeleton-row td:nth-child(11) { display: block; flex: 1 1 100%; }
   .skeleton-cell { display: block; width: 100%; }
 }
 

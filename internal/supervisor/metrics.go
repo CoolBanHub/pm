@@ -21,7 +21,8 @@ func CollectMetrics(statuses []Status) {
 		return
 	}
 	if output, err := exec.Command("ps", "-ax", "-o", "pid=,ppid=,%cpu=,rss=").Output(); err == nil {
-		applyProcessMetrics(statuses, output)
+		children := applyProcessMetrics(statuses, output)
+		collectTCPPortMetrics(statuses, children)
 	}
 	collectGoroutineMetrics(statuses)
 }
@@ -31,7 +32,7 @@ type processMetric struct {
 	memory int64
 }
 
-func applyProcessMetrics(statuses []Status, output []byte) {
+func applyProcessMetrics(statuses []Status, output []byte) map[int][]int {
 	metrics := make(map[int]processMetric)
 	children := make(map[int][]int)
 	for _, line := range strings.Split(string(output), "\n") {
@@ -60,12 +61,24 @@ func applyProcessMetrics(statuses []Status, output []byte) {
 		statuses[i].Children = len(children[root])
 		statuses[i].Descendants = descendantCount(root, children)
 	}
+	return children
 }
 
 func descendantCount(root int, children map[int][]int) int {
+	pids := processTreePIDs(root, children)
+	if len(pids) == 0 {
+		return 0
+	}
+	return len(pids) - 1
+}
+
+func processTreePIDs(root int, children map[int][]int) []int {
+	if root <= 0 {
+		return nil
+	}
 	seen := map[int]bool{root: true}
+	pids := []int{root}
 	stack := append([]int(nil), children[root]...)
-	count := 0
 	for len(stack) > 0 {
 		pid := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
@@ -73,10 +86,10 @@ func descendantCount(root int, children map[int][]int) int {
 			continue
 		}
 		seen[pid] = true
-		count++
+		pids = append(pids, pid)
 		stack = append(stack, children[pid]...)
 	}
-	return count
+	return pids
 }
 
 func collectGoroutineMetrics(statuses []Status) {

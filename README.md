@@ -10,7 +10,7 @@ PM 是一个面向 macOS/Linux 本机环境的进程管理工具。它由常驻�
 - `never`、`unexpected`、`always` 自动重启策略
 - 时间窗重启限流，持续失败后进入 `FATAL`
 - 独立进程组管理，优雅停止超时后强制结束整个进程树
-- CPU、内存、PID、运行时间、进程树和重启次数监控；Go 程序可选采集 goroutine 数
+- CPU、内存、PID、TCP 监听端口、运行时间、进程树和重启次数监控；Go 程序可选采集 goroutine 数
 - stdout/stderr 实时日志与在线日志切割
 - 持久化生命周期事件历史，事件文件自动压缩
 - 响应式 Web 管理后台和实时日志流
@@ -118,7 +118,7 @@ CLI 不依赖 HTTP，所有操作都通过 Unix Socket 完成。CLI 会依次使
 
 `pm up` 是 `pm daemon` 的短别名，参数会原样传递，因此 `pm up -d` 等价于 `pm daemon -d`。
 
-`status` 会显示状态、持久化模式、PID、CPU、内存、直接子进程、全部后代进程、Go goroutine、运行时间、启动次数和退出信息。`list` 是更精简的概览，仅显示名称、分组、状态、PID 和运行时间。上述进程操作都接受多个进程名或 `all`。
+`status` 会显示状态、持久化模式、PID、TCP 监听端口、CPU、内存、直接子进程、全部后代进程、Go goroutine、运行时间、启动次数和退出信息。`list` 是更精简的概览，显示名称、分组、状态、PID、TCP 监听端口、运行时间和描述。上述进程操作都接受多个进程名或 `all`。
 
 `stop` 只停止当前运行实例，daemon 或机器重启后仍会按 `autostart` 再次启动。`pause` 和 `disable` 会持久化标记并停止程序，之后 PM 被 systemd 重启也不会拉起它；分别使用 `resume` 和 `enable` 清除标记并立即启动。`autostart: false` 的程序始终只手动启动。
 
@@ -207,7 +207,7 @@ ssh -L 19090:127.0.0.1:19090 user@host
 
 `command` 不经过 shell。需要管道、重定向或循环时，应显式使用 `"command": "/bin/sh"` 和 `"args": ["-c", "..."]`。
 
-子进程指标由 PM 从操作系统的 PID/PPID 关系自动采集。操作系统无法仅凭 PID 得知 Go runtime 的 goroutine 数；Go 程序需要引入 `net/http/pprof`、启动仅本机可访问的 HTTP 监听，并配置 pprof 基础地址：
+子进程指标由 PM 从操作系统的 PID/PPID 关系自动采集。TCP 端口仅统计处于 `LISTEN` 状态的 socket，并把主进程及全部后代进程持有的端口去重后展示；Linux 从 `/proc` 读取，macOS 通过系统 `lsof` 读取。操作系统无法仅凭 PID 得知 Go runtime 的 goroutine 数；Go 程序需要引入 `net/http/pprof`、启动仅本机可访问的 HTTP 监听，并配置 pprof 基础地址：
 
 ```yaml
 pprof_url: http://127.0.0.1:6060/debug/pprof

@@ -3,6 +3,9 @@ package supervisor
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -31,6 +34,68 @@ func TestDescendantCountHandlesCycles(t *testing.T) {
 	children := map[int][]int{10: {11}, 11: {10, 12}}
 	if got := descendantCount(10, children); got != 2 {
 		t.Fatalf("descendantCount = %d, want 2", got)
+	}
+	if got := descendantCount(0, children); got != 0 {
+		t.Fatalf("descendantCount for missing PID = %d, want 0", got)
+	}
+}
+
+func TestApplyTCPPortMetricsIncludesDescendants(t *testing.T) {
+	statuses := []Status{{PID: 10}, {PID: 20}}
+	processTrees := [][]int{{10, 11, 12}, {20, 21}}
+	portsByPID := map[int][]int{
+		10: {9000},
+		11: {8080, 9000},
+		12: {443},
+		21: {5432},
+	}
+
+	applyTCPPortMetrics(statuses, processTrees, portsByPID)
+
+	if want := []int{443, 8080, 9000}; !reflect.DeepEqual(statuses[0].TCPPorts, want) {
+		t.Fatalf("first TCP ports = %v, want %v", statuses[0].TCPPorts, want)
+	}
+	if want := []int{5432}; !reflect.DeepEqual(statuses[1].TCPPorts, want) {
+		t.Fatalf("second TCP ports = %v, want %v", statuses[1].TCPPorts, want)
+	}
+}
+
+func TestLinuxTCPListeningPortsReadsSocketInodes(t *testing.T) {
+	procRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(procRoot, "net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(procRoot, "123", "fd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tcpTable := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  501        0 12345 1
+   1: 0100007F:C350 0100007F:01BB 01 00000000:00000000 00:00000000 00000000  501        0 54321 1
+`
+	if err := os.WriteFile(filepath.Join(procRoot, "net", "tcp"), []byte(tcpTable), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("socket:[12345]", filepath.Join(procRoot, "123", "fd", "7")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("socket:[54321]", filepath.Join(procRoot, "123", "fd", "8")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := linuxTCPListeningPorts(procRoot, []int{123})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[int][]int{123: {8080}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ports = %v, want %v", got, want)
+	}
+}
+
+func TestParseLsofTCP(t *testing.T) {
+	output := []byte("p100\nf4\nn*:9000\nf5\nn[::1]:8080\np200\nf3\nn127.0.0.1:5432\nf4\nn*:5432\n")
+	want := map[int][]int{100: {8080, 9000}, 200: {5432}}
+	if got := parseLsofTCP(output); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ports = %v, want %v", got, want)
 	}
 }
 
