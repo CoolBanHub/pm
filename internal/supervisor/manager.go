@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,6 +50,7 @@ type Status struct {
 	Restart     string    `json:"restart_policy"`
 	CPU         float64   `json:"cpu_percent"`
 	Memory      int64     `json:"memory_bytes"`
+	DiskUsage   int64     `json:"disk_bytes"`
 	TCPPorts    []int     `json:"tcp_ports,omitempty"`
 	Children    int       `json:"child_processes"`
 	Descendants int       `json:"descendant_processes"`
@@ -332,6 +334,7 @@ type Manager struct {
 	events    *EventStore
 	states    *ProgramStateStore
 	modeMu    sync.Mutex
+	disk      atomic.Pointer[DiskMonitor]
 }
 
 func (m *Manager) Apply(programs []config.Program) error {
@@ -437,6 +440,28 @@ func NewWithState(programs []config.Program, events *EventStore, states *Program
 		m.processes[program.Name] = newProcess(program, events)
 	}
 	return m
+}
+
+// SetDiskMonitor attaches a disk-usage monitor whose cached working-directory
+// sizes are stamped onto each Status during collection. It is optional: when no
+// monitor is set (e.g. in tests), disk fields are left at their zero value.
+func (m *Manager) SetDiskMonitor(d *DiskMonitor) { m.disk.Store(d) }
+
+// ApplyDiskUsage fills each status's DiskUsage from the monitor's in-memory
+// cache. Safe to call on every status poll.
+func (m *Manager) ApplyDiskUsage(statuses []Status) {
+	if disk := m.disk.Load(); disk != nil {
+		disk.Apply(statuses)
+	}
+}
+
+// DiskTotal returns the total disk capacity backing the tracked working
+// directories, or 0 when no monitor is attached.
+func (m *Manager) DiskTotal() int64 {
+	if disk := m.disk.Load(); disk != nil {
+		return disk.DiskTotal()
+	}
+	return 0
 }
 
 func (m *Manager) Events(after uint64, limit int) []Event {

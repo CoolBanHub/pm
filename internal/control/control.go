@@ -23,9 +23,11 @@ type Request struct {
 }
 
 type Response struct {
-	OK        bool                `json:"ok"`
-	Message   string              `json:"message,omitempty"`
-	Processes []supervisor.Status `json:"processes,omitempty"`
+	OK        bool                 `json:"ok"`
+	Message   string               `json:"message,omitempty"`
+	Processes []supervisor.Status  `json:"processes,omitempty"`
+	Host      *supervisor.HostInfo `json:"host,omitempty"`
+	DiskTotal int64                `json:"disk_total,omitempty"`
 }
 
 func Call(socket string, request Request) (Response, error) {
@@ -120,8 +122,12 @@ func (s *Server) dispatch(request Request) (Response, bool) {
 		statuses, err := manager.Status(request.Names)
 		if err == nil {
 			supervisor.CollectMetrics(statuses)
+			manager.ApplyDiskUsage(statuses)
 		}
-		return result(statuses, err), false
+		resp := result(statuses, err)
+		resp.Host = supervisor.CachedHostInfo()
+		resp.DiskTotal = manager.DiskTotal()
+		return resp, false
 	case "start":
 		s.mu.RLock()
 		defer s.mu.RUnlock()

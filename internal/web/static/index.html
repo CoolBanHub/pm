@@ -65,9 +65,17 @@
           <span class="stat-icon danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 20h20Z"/><path d="M12 9v5M12 18h.01"/></svg></span>
           <div class="stat-body"><span>异常</span><strong id="summary-failed">0</strong></div>
         </div>
+        <div class="stat-card">
+          <span class="stat-icon muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></span>
+          <div class="stat-body"><span>CPU 核心</span><strong id="summary-cores">-</strong></div>
+        </div>
         <div class="stat-card resources">
           <span class="stat-icon muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></span>
           <div class="stat-body"><span>内存占用</span><strong id="summary-memory">0 B</strong></div>
+        </div>
+        <div class="stat-card resources">
+          <span class="stat-icon muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></span>
+          <div class="stat-body"><span>磁盘占用</span><strong id="summary-disk">0 B</strong></div>
         </div>
       </section>
 
@@ -127,8 +135,9 @@
                 <th data-sort="state"><span>状态</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="pid" class="num-col"><span>PID</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="ports"><span>TCP 端口</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="cpu" class="num-col"><span>CPU</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="memory" class="num-col"><span>内存</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="cpu" id="th-cpu" class="num-col" title="占单核 CPU 比例（满载 100%，可超 100%）"><span>CPU</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="memory" class="num-col" title="进程驻留物理内存（RSS）"><span>内存</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="disk" class="num-col" title="工作目录占用"><span>磁盘</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="children" class="num-col"><span>子进程</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="goroutines" class="num-col"><span>协程</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="uptime" class="num-col"><span>运行时间</span><i class="sort-ic" aria-hidden="true"></i></th>

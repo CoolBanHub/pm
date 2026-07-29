@@ -20,6 +20,7 @@ const state = {
   // new
   sortKey: 'name', sortDir: 'asc',
   lastSig: '', lastCount: -1, firstLoad: true,
+  host: null, diskTotal: 0,
 };
 
 async function api(path, options = {}) {
@@ -68,6 +69,8 @@ async function loadProcesses() {
   try {
     const data = await api('/api/v1/processes');
     state.processes = data.processes || [];
+    state.host = data.host || null;
+    state.diskTotal = data.disk_total || 0;
     const currentNames = new Set(state.processes.map(process => process.name));
     state.selectedNames = new Set([...state.selectedNames].filter(name => currentNames.has(name)));
     renderGroupOptions();
@@ -123,17 +126,33 @@ $('#theme-toggle').addEventListener('click', toggleTheme);
 /* ============================================================
    Summary
    ============================================================ */
+function pct(used, total) {
+  if (!total) return '0%';
+  return `${(used / total * 100).toFixed(1)}%`;
+}
 function renderSummary() {
   const running = state.processes.filter(p => p.state === 'RUNNING').length;
   const failed = state.processes.filter(p => p.state === 'FATAL').length;
   const idle = state.processes.length - running - failed;
   const memory = state.processes.reduce((sum, p) => sum + (p.memory_bytes || 0), 0);
+  const disk = state.processes.reduce((sum, p) => sum + (p.disk_bytes > 0 ? p.disk_bytes : 0), 0);
   $('#summary-total').textContent = state.processes.length;
   $('#summary-groups').textContent = new Set(state.processes.map(p => p.group || 'default')).size;
   $('#summary-running').textContent = running;
   $('#summary-idle').textContent = idle;
   $('#summary-failed').textContent = failed;
-  $('#summary-memory').textContent = formatBytes(memory);
+  const memTotal = state.host?.memory_total || 0;
+  $('#summary-memory').textContent = memTotal > 0
+    ? `${formatBytes(memory)} / ${formatBytes(memTotal)} (${pct(memory, memTotal)})`
+    : formatBytes(memory);
+  const diskTotal = state.diskTotal || 0;
+  $('#summary-disk').textContent = diskTotal > 0
+    ? `${formatBytes(disk)} / ${formatBytes(diskTotal)} (${pct(disk, diskTotal)})`
+    : formatBytes(disk);
+  const cores = state.host?.cpu_count || 0;
+  $('#summary-cores').textContent = cores > 0 ? cores : '-';
+  const thCpu = $('#th-cpu');
+  if (thCpu && cores > 0) thCpu.title = `占单核 CPU 比例（满载 100%，${cores} 核满载为 ${cores * 100}%，可超 100%）`;
 }
 $$('.stat-card[data-state]').forEach(card => card.addEventListener('click', () => setStateFilter(card.dataset.state)));
 
@@ -164,6 +183,7 @@ function sortProcesses(list) {
       case 'state': va = STATE_ORDER[a.state] ?? 9; vb = STATE_ORDER[b.state] ?? 9; break;
       case 'cpu': va = a.cpu_percent || 0; vb = b.cpu_percent || 0; break;
       case 'memory': va = a.memory_bytes || 0; vb = b.memory_bytes || 0; break;
+      case 'disk': va = a.disk_bytes ?? -1; vb = b.disk_bytes ?? -1; break;
       case 'children': va = a.child_processes || 0; vb = b.child_processes || 0; break;
       case 'goroutines': va = a.goroutines ?? -1; vb = b.goroutines ?? -1; break;
       case 'pid': va = a.pid || 0; vb = b.pid || 0; break;
@@ -204,6 +224,7 @@ function rowMarkup(process, animate) {
     <td class="cell-ports" data-label="TCP 端口" title="TCP 监听端口：${escapeAttr(formatTCPPorts(process.tcp_ports))}"><span class="metric">${escapeHTML(formatTCPPorts(process.tcp_ports))}</span></td>
     <td class="num-col cell-cpu" data-label="CPU"><span class="metric">${process.pid ? `${(process.cpu_percent || 0).toFixed(1)}%` : '-'}</span></td>
     <td class="num-col cell-mem" data-label="内存"><span class="metric">${process.pid ? formatBytes(process.memory_bytes || 0) : '-'}</span></td>
+    <td class="num-col cell-disk" data-label="磁盘" title="工作目录占用"><span class="metric">${process.disk_bytes >= 0 ? formatBytes(process.disk_bytes) : '-'}</span></td>
     <td class="num-col cell-children" data-label="子进程"><span class="metric">${process.pid ? (process.child_processes || 0) : '-'}</span></td>
     <td class="num-col cell-goroutines" data-label="协程"><span class="metric">${process.pid && Number.isInteger(process.goroutines) ? process.goroutines : '-'}</span></td>
     <td class="num-col cell-up" data-label="运行时间">${escapeHTML(process.uptime || '-')}</td>
@@ -254,6 +275,7 @@ function updateRowsInPlace(processes) {
     const portsCell = row.querySelector('.cell-ports'); if (portsCell) portsCell.title = `TCP 监听端口：${ports}`;
     setHTML('.cell-cpu', `<span class="metric">${p.pid ? `${(p.cpu_percent || 0).toFixed(1)}%` : '-'}</span>`);
     setHTML('.cell-mem', `<span class="metric">${p.pid ? formatBytes(p.memory_bytes || 0) : '-'}</span>`);
+    setHTML('.cell-disk', `<span class="metric">${p.disk_bytes >= 0 ? formatBytes(p.disk_bytes) : '-'}</span>`);
     setHTML('.cell-children', `<span class="metric">${p.pid ? (p.child_processes || 0) : '-'}</span>`);
     setHTML('.cell-goroutines', `<span class="metric">${p.pid && Number.isInteger(p.goroutines) ? p.goroutines : '-'}</span>`);
     const up = row.querySelector('.cell-up'); if (up) up.textContent = p.uptime || '-';
@@ -747,7 +769,7 @@ function detail(label, value, wide = false) { return `<div class="detail-item ${
 function commandText(p) { return [p.command, ...(p.args || [])].join(' '); }
 function formatTCPPorts(ports) { return ports?.length ? ports.join(', ') : '-'; }
 function formatBytes(bytes) {
-  if (!bytes) return '0 B'; const units = ['B', 'KB', 'MB', 'GB']; let value = bytes, unit = 0;
+  if (!bytes) return '0 B'; const units = ['B', 'KB', 'MB', 'GB', 'TB']; let value = bytes, unit = 0;
   while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
   return `${value.toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`;
 }

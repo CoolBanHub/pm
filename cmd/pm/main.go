@@ -225,6 +225,12 @@ func serveDaemon(configPath string, cfg config.Config) error {
 		return err
 	}
 	manager := supervisor.NewWithState(cfg.Programs, events, states)
+	if monitor, err := supervisor.NewDiskMonitor(cfg.StateDir, 5*time.Minute); err != nil {
+		logger.Printf("disk monitor: %v", err)
+	} else {
+		manager.SetDiskMonitor(monitor)
+		defer monitor.Stop()
+	}
 	for _, err := range manager.Autostart() {
 		logger.Printf("autostart: %v", err)
 	}
@@ -366,6 +372,7 @@ func controlCommand(socket, action string, names []string) error {
 		return errors.New(response.Message)
 	}
 	if action == "status" {
+		printHostLine(response.Host, response.DiskTotal)
 		printStatuses(response.Processes)
 	} else if response.Message != "" {
 		fmt.Println(response.Message)
@@ -387,10 +394,10 @@ func listCommand(socket string, names []string) error {
 
 func printStatuses(statuses []supervisor.Status) {
 	rows := [][]string{
-		{"NAME", "GROUP", "STATE", "MODE", "PID", "TCP PORTS", "CPU", "MEMORY", "CHILDREN", "DESCENDANTS", "GOROUTINES", "UPTIME", "STARTS", "EXIT", "DETAIL"},
+		{"NAME", "GROUP", "STATE", "MODE", "PID", "TCP PORTS", "CPU", "MEMORY", "DISK", "CHILDREN", "DESCENDANTS", "GOROUTINES", "UPTIME", "STARTS", "EXIT", "DETAIL"},
 	}
 	for _, status := range statuses {
-		pid, tcpPorts, cpu, memory, children, descendants, goroutines, exit := "-", "-", "-", "-", "-", "-", "-", "-"
+		pid, tcpPorts, cpu, memory, disk, children, descendants, goroutines, exit := "-", "-", "-", "-", "-", "-", "-", "-", "-"
 		mode := "enabled"
 		if status.Disabled {
 			mode = "disabled"
@@ -410,6 +417,9 @@ func printStatuses(statuses []supervisor.Status) {
 				goroutines = strconv.Itoa(*status.Goroutines)
 			}
 		}
+		if status.DiskUsage >= 0 {
+			disk = formatBytes(status.DiskUsage)
+		}
 		if status.ExitCode != nil {
 			exit = strconv.Itoa(*status.ExitCode)
 		}
@@ -421,10 +431,27 @@ func printStatuses(statuses []supervisor.Status) {
 			detail += fmt.Sprintf("restarts=%d", status.Restarts)
 		}
 		rows = append(rows, []string{
-			status.Name, status.Group, status.State, mode, pid, tcpPorts, cpu, memory, children, descendants, goroutines, valueOrDash(status.Uptime), strconv.Itoa(status.Starts), exit, detail,
+			status.Name, status.Group, status.State, mode, pid, tcpPorts, cpu, memory, disk, children, descendants, goroutines, valueOrDash(status.Uptime), strconv.Itoa(status.Starts), exit, detail,
 		})
 	}
 	fmt.Print(renderTable(rows))
+}
+
+// printHostLine prints a one-line summary of host resources (CPU cores, total
+// memory, total disk) above the process table so per-process CPU/memory numbers
+// have a baseline to compare against.
+func printHostLine(host *supervisor.HostInfo, diskTotal int64) {
+	if host == nil {
+		return
+	}
+	parts := []string{fmt.Sprintf("%d cores", host.CPUCount)}
+	if host.TotalMemory > 0 {
+		parts = append(parts, formatBytes(host.TotalMemory)+" memory")
+	}
+	if diskTotal > 0 {
+		parts = append(parts, formatBytes(diskTotal)+" disk")
+	}
+	fmt.Printf("host: %s\n", strings.Join(parts, ", "))
 }
 
 // printList renders a compact overview of managed processes. Unlike
@@ -463,8 +490,11 @@ func formatBytes(value int64) string {
 		kib = int64(1024)
 		mib = 1024 * kib
 		gib = 1024 * mib
+		tib = 1024 * gib
 	)
 	switch {
+	case value >= tib:
+		return fmt.Sprintf("%.1fTiB", float64(value)/float64(tib))
 	case value >= gib:
 		return fmt.Sprintf("%.1fGiB", float64(value)/float64(gib))
 	case value >= mib:

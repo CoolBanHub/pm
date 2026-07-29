@@ -209,7 +209,12 @@ func (s *Server) handleProcesses(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, response.Message)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"processes": response.Processes, "timestamp": time.Now()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"processes":  response.Processes,
+		"host":       response.Host,
+		"disk_total": response.DiskTotal,
+		"timestamp":  time.Now(),
+	})
 }
 
 func (s *Server) handleProcessAction(w http.ResponseWriter, r *http.Request) {
