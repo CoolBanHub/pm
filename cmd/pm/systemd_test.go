@@ -1,9 +1,23 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestDefaultSystemdConfigPathIgnoresCurrentConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pm.yaml"), []byte("socket: run/pm.sock\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	if got, want := defaultSystemdConfigPath("/home/deploy"), "/home/deploy/.pm/pm.yaml"; got != want {
+		t.Fatalf("default systemd config path = %q, want %q", got, want)
+	}
+}
 
 func TestRenderSystemdUnit(t *testing.T) {
 	identity := serviceIdentity{

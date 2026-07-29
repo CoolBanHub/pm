@@ -9,6 +9,26 @@ const ICON = {
 // semantic order for state sorting (healthier first)
 const STATE_ORDER = { RUNNING: 0, BACKOFF: 1, STOPPING: 2, STARTING: 3, STOPPED: 4, EXITED: 5, FATAL: 6 };
 
+// 可隐藏的列：key 对应 body.hide-col-<key>、th.col-<key>、td.cell-<key>
+const COLUMNS = [
+  { key: 'group', label: '分组', width: 7 },
+  { key: 'pid', label: 'PID', width: 5 },
+  { key: 'ports', label: 'TCP 端口', width: 7 },
+  { key: 'cpu', label: 'CPU', width: 5 },
+  { key: 'mem', label: '内存', width: 7 },
+  { key: 'disk', label: '磁盘', width: 8 },
+  { key: 'children', label: '子进程', width: 5 },
+  { key: 'goroutines', label: '协程', width: 6 },
+  { key: 'up', label: '运行时间', width: 5 },
+  { key: 'restarts', label: '重启', width: 5 },
+];
+function loadHiddenCols() {
+  const raw = localStorage.getItem('pm-columns');
+  if (raw === null) return ['goroutines']; // 首次使用默认隐藏协程列
+  try { return JSON.parse(raw); } catch { return []; }
+}
+function saveHiddenCols() { localStorage.setItem('pm-columns', JSON.stringify([...state.hiddenCols])); }
+
 const state = {
   token: sessionStorage.getItem('pm-token') || '',
   processes: [], events: [],
@@ -21,6 +41,7 @@ const state = {
   sortKey: 'name', sortDir: 'asc',
   lastSig: '', lastCount: -1, firstLoad: true,
   host: null, diskTotal: 0,
+  hiddenCols: new Set(loadHiddenCols()),
 };
 
 async function api(path, options = {}) {
@@ -51,6 +72,7 @@ async function bootstrap() {
 function showAuth() { $('#auth-view').classList.remove('hidden'); $('#app').classList.add('hidden'); }
 function showApp() {
   $('#auth-view').classList.add('hidden'); $('#app').classList.remove('hidden');
+  applyColumnVisibility();
   renderSkeleton();
   refreshAll();
   setInterval(loadProcesses, 2000);
@@ -217,9 +239,9 @@ $$('th[data-sort]').forEach(th => th.addEventListener('click', () => {
 function rowMarkup(process, animate) {
   return `<tr data-name="${escapeAttr(process.name)}" class="${animate ? 'is-entering' : ''}">
     <td class="check-column"><input type="checkbox" data-select="${escapeAttr(process.name)}" aria-label="选择 ${escapeAttr(process.name)}" ${state.selectedNames.has(process.name) ? 'checked' : ''}></td>
-    <td class="cell-name"><button class="process-name" data-detail="${escapeAttr(process.name)}">${escapeHTML(process.name)}</button>${process.description ? `<span class="process-description">${escapeHTML(process.description)}</span>` : ''}<span class="process-command">${escapeHTML(commandText(process))}</span></td>
-    <td class="cell-group" data-label="分组"><button class="group-tag group-button" data-edit-group="${escapeAttr(process.name)}" title="修改分组">${escapeHTML(process.group || 'default')}</button></td>
-    <td class="cell-state" data-label="状态">${statusBadge(process.state, '', process.paused)}</td>
+    <td class="cell-name"><button class="process-name" data-detail="${escapeAttr(process.name)}" title="${escapeAttr(process.description ? `${process.name} — ${process.description}` : process.name)}">${escapeHTML(process.name)}</button>${process.description ? `<span class="process-description">${escapeHTML(process.description)}</span>` : ''}<span class="process-command">${escapeHTML(commandText(process))}</span></td>
+    <td class="cell-group" data-label="分组"><button class="group-tag group-button" data-edit-group="${escapeAttr(process.name)}" title="${escapeAttr(process.group || 'default')}">${escapeHTML(process.group || 'default')}</button></td>
+    <td class="cell-state" data-label="状态">${statusBadge(process.state, '', process.paused, true)}</td>
     <td class="num-col cell-pid" data-label="PID"><span class="metric">${process.pid || '-'}</span></td>
     <td class="cell-ports" data-label="TCP 端口" title="TCP 监听端口：${escapeAttr(formatTCPPorts(process.tcp_ports))}"><span class="metric">${escapeHTML(formatTCPPorts(process.tcp_ports))}</span></td>
     <td class="num-col cell-cpu" data-label="CPU"><span class="metric">${process.pid ? `${(process.cpu_percent || 0).toFixed(1)}%` : '-'}</span></td>
@@ -392,9 +414,10 @@ $('#row-more-menu').addEventListener('click', event => {
 });
 document.addEventListener('click', event => {
   if (!event.target.closest('[data-more]') && !event.target.closest('#row-more-menu')) closeMoreMenu();
+  if (!event.target.closest('#column-toggle') && !event.target.closest('#column-menu')) closeColumnMenu();
 });
-window.addEventListener('resize', closeMoreMenu);
-window.addEventListener('scroll', closeMoreMenu, true);
+window.addEventListener('resize', () => { closeMoreMenu(); closeColumnMenu(); });
+window.addEventListener('scroll', () => { closeMoreMenu(); closeColumnMenu(); }, true);
 $('#search').addEventListener('input', e => { state.query = e.target.value; renderProcesses(); });
 $('#group-filter').addEventListener('change', e => { state.groupFilter = e.target.value; renderProcesses(); });
 $('#state-filter').addEventListener('click', e => {
@@ -413,6 +436,49 @@ $('#select-visible').addEventListener('click', () => {
   visibleProcesses().forEach(process => state.selectedNames.add(process.name)); renderProcesses();
 });
 $('#selection-clear').addEventListener('click', () => { state.selectedNames.clear(); renderProcesses(); });
+
+/* ============================================================
+   Column visibility (show / hide columns)
+   ============================================================ */
+function applyColumnVisibility() {
+  COLUMNS.forEach(({ key }) => document.body.classList.toggle(`hide-col-${key}`, state.hiddenCols.has(key)));
+  const reclaimedWidth = COLUMNS.reduce((sum, column) => sum + (state.hiddenCols.has(column.key) ? column.width : 0), 0);
+  document.documentElement.style.setProperty('--name-column-width', `calc(${19 + reclaimedWidth}% - 42px)`);
+}
+function renderColumnMenu() {
+  $('#column-menu').innerHTML = COLUMNS.map(({ key, label }) =>
+    `<label><input type="checkbox" data-col="${escapeAttr(key)}" ${state.hiddenCols.has(key) ? '' : 'checked'}><span>${escapeHTML(label)}</span></label>`
+  ).join('');
+}
+function toggleColumnMenu() {
+  const menu = $('#column-menu');
+  const button = $('#column-toggle');
+  if (!menu.classList.contains('hidden')) return closeColumnMenu();
+  renderColumnMenu();
+  menu.classList.remove('hidden');
+  button.setAttribute('aria-expanded', 'true');
+  const rect = button.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 6}px`;
+  menu.style.left = `${Math.max(8, rect.right - menu.offsetWidth)}px`;
+}
+function closeColumnMenu() {
+  $('#column-menu').classList.add('hidden');
+  $('#column-toggle').setAttribute('aria-expanded', 'false');
+}
+$('#column-toggle').addEventListener('click', (event) => {
+  event.stopPropagation();
+  closeMoreMenu();
+  toggleColumnMenu();
+});
+$('#column-menu').addEventListener('click', (event) => event.stopPropagation());
+$('#column-menu').addEventListener('change', (event) => {
+  const input = event.target.closest('[data-col]');
+  if (!input) return;
+  const key = input.dataset.col;
+  if (input.checked) state.hiddenCols.delete(key); else state.hiddenCols.add(key);
+  saveHiddenCols();
+  applyColumnVisibility();
+});
 
 /* ============================================================
    Actions (start / stop / restart / bulk)
@@ -748,6 +814,7 @@ function toast(message, error = false) {
    ============================================================ */
 function closeTopmost() {
   if (!$('#row-more-menu').classList.contains('hidden')) return closeMoreMenu();
+  if (!$('#column-menu').classList.contains('hidden')) return closeColumnMenu();
   if (!$('#confirm-modal').classList.contains('hidden')) return closeConfirm();
   if (!$('#process-modal').classList.contains('hidden')) return closeProcessForm();
   if (!$('#config-modal').classList.contains('hidden')) return $('#config-modal').classList.add('hidden');
@@ -760,10 +827,13 @@ document.addEventListener('keydown', event => {
 /* ============================================================
    Helpers
    ============================================================ */
-function statusBadge(status, id = '', paused = false) {
+function statusBadge(status, id = '', paused = false, compact = false) {
   const labels = { RUNNING: '运行中', STOPPED: '已停止', EXITED: '已退出', BACKOFF: '等待重启', STOPPING: '停止中', STARTING: '启动中', FATAL: '异常' };
   const cls = status === 'RUNNING' ? 'status-running' : status === 'FATAL' ? 'status-fatal' : status === 'BACKOFF' ? 'status-backoff' : '';
-  return `<span ${id ? `id="${id}"` : ''} class="status-badge ${paused ? 'status-backoff' : cls}">${paused ? '已暂停' : (labels[status] || status)}</span>`;
+  const text = paused ? '已暂停' : (labels[status] || status);
+  const klass = `status-badge${compact ? ' compact' : ''} ${paused ? 'status-backoff' : cls}`.trim();
+  const attrs = compact ? ` title="${escapeAttr(text)}" aria-label="${escapeAttr(text)}"` : '';
+  return `<span ${id ? `id="${id}"` : ''} class="${klass}"${attrs}>${compact ? '' : text}</span>`;
 }
 function detail(label, value, wide = false) { return `<div class="detail-item ${wide ? 'wide' : ''}"><span>${label}</span><code>${escapeHTML(String(value ?? '-'))}</code></div>`; }
 function commandText(p) { return [p.command, ...(p.args || [])].join(' '); }

@@ -41,3 +41,6 @@ Thumbs.db
 *.bak
 # Claude Code local-only settings
 .claude/settings.local.json
+
+# Added by aicommit after detecting protected files
+/pm

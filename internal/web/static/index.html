@@ -120,6 +120,10 @@
               <select id="group-filter" aria-label="分组筛选"><option value="all">全部分组</option></select>
               <button id="select-visible" class="button quiet">选择当前列表</button>
             </div>
+            <button id="column-toggle" class="button quiet" title="选择显示的列" aria-haspopup="true" aria-expanded="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18"/></svg>
+              列
+            </button>
           </div>
         </div>
 
@@ -131,17 +135,17 @@
               <tr>
                 <th class="check-column"><input id="select-all" type="checkbox" aria-label="选择当前列表全部进程"></th>
                 <th data-sort="name" data-sort-dir="asc"><span>名称</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="group"><span>分组</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="group" class="col-group"><span>分组</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th data-sort="state"><span>状态</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="pid" class="num-col"><span>PID</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="ports"><span>TCP 端口</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="cpu" id="th-cpu" class="num-col" title="占单核 CPU 比例（满载 100%，可超 100%）"><span>CPU</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="memory" class="num-col" title="进程驻留物理内存（RSS）"><span>内存</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="disk" class="num-col" title="工作目录占用"><span>磁盘</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="children" class="num-col"><span>子进程</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="goroutines" class="num-col"><span>协程</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="uptime" class="num-col"><span>运行时间</span><i class="sort-ic" aria-hidden="true"></i></th>
-                <th data-sort="restarts" class="num-col"><span>重启</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="pid" class="num-col col-pid"><span>PID</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="ports" class="col-ports"><span>TCP 端口</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="cpu" id="th-cpu" class="num-col col-cpu" title="占单核 CPU 比例（满载 100%，可超 100%）"><span>CPU</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="memory" class="num-col col-mem" title="进程驻留物理内存（RSS）"><span>内存</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="disk" class="num-col col-disk" title="工作目录占用"><span>磁盘</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="children" class="num-col col-children"><span>子进程</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="goroutines" class="num-col col-goroutines"><span>协程</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="uptime" class="num-col col-up"><span>运行时间</span><i class="sort-ic" aria-hidden="true"></i></th>
+                <th data-sort="restarts" class="num-col col-restarts"><span>重启</span><i class="sort-ic" aria-hidden="true"></i></th>
                 <th class="actions-column">操作</th>
               </tr>
             </thead>
@@ -268,6 +272,7 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
   <div id="row-more-menu" class="row-more-menu hidden" role="menu"></div>
+  <div id="column-menu" class="column-menu hidden" role="menu" aria-label="列显示设置"></div>
   <script src="/app.js" defer></script>
 </body>
 </html>

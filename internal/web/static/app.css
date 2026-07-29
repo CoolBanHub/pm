@@ -320,7 +320,7 @@ select {
 .selection-bar strong { font-size: 12px; }
 
 .table-wrap { overflow-x: auto; }
-table { width: 100%; min-width: 1180px; border-collapse: collapse; table-layout: fixed; }
+table { width: 100%; min-width: 1240px; border-collapse: collapse; table-layout: fixed; }
 thead { position: sticky; top: 0; z-index: 2; }
 th {
   height: 40px;
@@ -355,14 +355,15 @@ th[data-sort-dir="asc"] .sort-ic { opacity: 1; transform: rotate(-135deg); }
 th[data-sort-dir="desc"] .sort-ic { opacity: 1; transform: rotate(45deg); }
 
 td { height: var(--row-h); padding: 8px 14px; border-bottom: 1px solid var(--surface-2); vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-td.num-col { text-align: right; font-variant-numeric: tabular-nums; }
+td.num-col { text-align: right; font-variant-numeric: tabular-nums; padding-left: 10px; padding-right: 10px; }
 tbody tr:last-child td { border-bottom: 0; }
 tbody tr { transition: background-color .12s; }
 tbody tr:hover { background: var(--surface-hover); }
 .check-column { width: 42px; text-align: center; }
-th:nth-child(2) { width: 17%; } th:nth-child(3) { width: 7%; } th:nth-child(4) { width: 8%; }
-th:nth-child(5), th:nth-child(7), th:nth-child(9), th:nth-child(10), th:nth-child(12) { width: 5%; }
-th:nth-child(6) { width: 10%; } th:nth-child(8) { width: 7%; } th:nth-child(11) { width: 8%; } th:last-child { width: 14%; }
+/* 名称列吸收隐藏列留下的空间，避免固定宽度的复选框列被撑宽；窄屏交给横向滚动 */
+th:nth-child(2) { width: var(--name-column-width, 14%); } th:nth-child(3) { width: 7%; } th:nth-child(4) { width: 4%; }
+th:nth-child(5), th:nth-child(7), th:nth-child(10), th:nth-child(12), th:nth-child(13) { width: 5%; }
+th:nth-child(6) { width: 7%; } th:nth-child(8) { width: 7%; } th:nth-child(9) { width: 8%; } th:nth-child(11) { width: 6%; } th:last-child { width: 17%; }
 td.check-column { text-align: center; }
 input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 
@@ -379,9 +380,12 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 .status-running::before { animation: pulse-dot 2s infinite; }
 .status-backoff { color: var(--amber); background: var(--amber-soft); border-color: transparent; }
 .status-fatal { color: var(--red); background: var(--red-soft); border-color: transparent; }
+/* 表格内紧凑态：仅保留彩色圆点（文字走原生 title 悬浮），省横向空间 */
+.status-badge.compact { padding: 0; background: transparent; border-color: transparent; font-size: 0; line-height: 0; }
+.status-badge.compact::before { width: 10px; height: 10px; }
 
-.row-actions { display: flex; justify-content: flex-end; gap: 6px; }
-.row-actions .button { min-height: 30px; padding: 0 11px; font-size: 12px; }
+.row-actions { display: flex; justify-content: flex-start; gap: 6px; }
+.row-actions .button { min-height: 30px; padding: 0 9px; font-size: 12px; }
 .row-actions .more-button { padding-right: 8px; }
 .row-actions .more-button svg { width: 13px; height: 13px; transition: transform .15s; }
 .row-actions .more-button[aria-expanded="true"] svg { transform: rotate(180deg); }
@@ -389,6 +393,24 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 .row-more-menu button { width: 100%; height: 34px; padding: 0 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); text-align: left; font-size: 12.5px; }
 .row-more-menu button:hover { background: var(--surface-hover); }
 .row-more-menu button.danger { color: var(--red); }
+
+/* 列显隐：body.hide-col-<key> 同时隐藏对应表头(th.col-*)与单元格(td.cell-*) */
+body.hide-col-group .col-group, body.hide-col-group .cell-group,
+body.hide-col-pid .col-pid, body.hide-col-pid .cell-pid,
+body.hide-col-ports .col-ports, body.hide-col-ports .cell-ports,
+body.hide-col-cpu .col-cpu, body.hide-col-cpu .cell-cpu,
+body.hide-col-mem .col-mem, body.hide-col-mem .cell-mem,
+body.hide-col-disk .col-disk, body.hide-col-disk .cell-disk,
+body.hide-col-children .col-children, body.hide-col-children .cell-children,
+body.hide-col-goroutines .col-goroutines, body.hide-col-goroutines .cell-goroutines,
+body.hide-col-up .col-up, body.hide-col-up .cell-up,
+body.hide-col-restarts .col-restarts, body.hide-col-restarts .cell-restarts { display: none !important; }
+
+/* 「列」开关下拉面板 */
+.column-menu { position: fixed; z-index: 70; width: 168px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-md); }
+.column-menu label { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 6px; border-radius: var(--radius-sm); font-size: 12.5px; color: var(--ink); cursor: pointer; user-select: none; }
+.column-menu label:hover { background: var(--surface-hover); }
+.column-menu input[type="checkbox"] { margin: 0; }
 
 .empty-state { padding: 56px 20px; text-align: center; color: var(--muted); animation: fadeIn .25s ease; }
 .empty-icon { width: 52px; height: 52px; margin: 0 auto 14px; border-radius: 50%; background: var(--surface-2); display: grid; place-items: center; color: var(--faint); }
@@ -558,6 +580,15 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
   }
   tbody tr:last-child { border-bottom: 0; }
   td { display: inline-flex; align-items: center; height: auto; padding: 0; border: 0; white-space: nowrap; overflow: visible; }
+  /* 卡片模式下数字单元格内边距归零，与其它 chip 一致 */
+  td.num-col { padding: 0; }
+
+  /* 卡片模式空间充足：紧凑状态恢复成完整药丸（文字+圆点） */
+  .status-badge.compact { padding: 3px 9px; background: var(--surface-2); border-color: var(--border); font-size: 11px; line-height: 1.4; }
+  .status-badge.compact.status-running { background: var(--green-soft); border-color: transparent; }
+  .status-badge.compact.status-backoff { background: var(--amber-soft); border-color: transparent; }
+  .status-badge.compact.status-fatal { background: var(--red-soft); border-color: transparent; }
+  .status-badge.compact::before { width: 6px; height: 6px; }
 
   /* top row: checkbox / name(+command) / status */
   .check-column { order: 0; align-self: flex-start; padding-top: 2px; flex-shrink: 0; }

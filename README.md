@@ -49,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/CoolBanHub/pm/main/install.sh | sh 
 make build
 ```
 
-需要管理进程时，可以复制并修改示例配置：`cp pm.example.yaml pm.yaml`。不创建配置文件也可以先启动 PM。
+需要管理进程时，可以复制并修改示例配置：`cp pm.example.yaml pm.yaml`，启动时通过 `-config pm.yaml` 显式选用。不创建配置文件也可以先启动 PM。
 
 安装到 `$GOBIN`：
 
@@ -65,7 +65,7 @@ make install
 ./bin/pm daemon
 ```
 
-未指定 `-config` 时，PM 优先使用当前工作目录下的 `pm.yaml`；不存在则使用家目录默认配置 `~/.pm/pm.yaml`。首次启动若 `~/.pm/pm.yaml` 不存在，PM 会自动创建 `~/.pm/` 并写出一份可编辑的默认配置。默认配置不含受管进程，使用 `~/.pm/pm.sock`、`~/.pm` 状态目录，并在 `127.0.0.1:19090` 启用 Web。明确指定了 `-config FILE` 时，如果文件不存在仍会报错。
+未指定 `-config` 时，PM 始终使用家目录默认配置 `~/.pm/pm.yaml`，不会自动读取当前工作目录下的 `pm.yaml`。首次启动若默认配置不存在，PM 会自动创建 `~/.pm/` 并写出一份可编辑的配置。默认配置不含受管进程，使用 `~/.pm/pm.sock`、`~/.pm` 状态目录，并在 `127.0.0.1:19090` 启用 Web。只有明确指定 `-config FILE` 才会使用其他 YAML；指定的文件不存在时会报错。
 
 指定其他配置文件：
 
@@ -87,7 +87,7 @@ Linux 上可以直接安装为 systemd 系统服务。命令会把当前 PM 二�
 sudo ./bin/pm systemd
 ```
 
-默认使用当前目录的 `pm.yaml`；当前目录没有配置时使用发起 sudo 的用户的 `~/.pm/pm.yaml`。也可以明确指定配置：
+默认使用发起 sudo 的用户的 `~/.pm/pm.yaml`。使用其他配置时必须明确指定：
 
 ```bash
 sudo ./bin/pm systemd -config /etc/pm/pm.yaml
@@ -118,7 +118,7 @@ tar -xzf pm-linux-amd64.tar.gz
 
 ## 命令行控制
 
-CLI 不依赖 HTTP，所有操作都通过 Unix Socket 完成。CLI 会依次使用 `-socket`、`PM_SOCKET`、配置（当前目录 `pm.yaml` 或 `~/.pm/pm.yaml`）中的 `socket`，最后回退到内置的 `~/.pm/pm.sock`：
+CLI 不依赖 HTTP，所有操作都通过 Unix Socket 完成。CLI 会依次使用 `-socket`、`PM_SOCKET`、`~/.pm/pm.yaml` 中的 `socket`，最后回退到内置的 `~/.pm/pm.sock`。当前目录的 `pm.yaml` 不会改变控制目标：
 
 ```bash
 ./bin/pm status

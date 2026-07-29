@@ -16,10 +16,15 @@ install:
 
 # install-local builds pm and copies it to ~/bin/pm, the binary currently on
 # PATH and run by the daemon. Prefer this over install (go install -> GOBIN).
-# Copying over a running binary is safe: the daemon keeps the old code in
-# memory until you restart it with `pm down && pm up -d`.
+# Replace the binary atomically so a running daemon keeps its old inode while
+# new invocations use a complete binary with a valid macOS code-signing cache.
 install-local: build
-	cp bin/pm $(HOME)/bin/pm
+	@tmp=$$(mktemp "$(HOME)/bin/.pm.XXXXXX"); \
+	trap 'rm -f "$$tmp"' EXIT; \
+	cp bin/pm "$$tmp"; \
+	chmod 755 "$$tmp"; \
+	mv -f "$$tmp" "$(HOME)/bin/pm"; \
+	trap - EXIT
 
 clean:
 	rm -rf bin

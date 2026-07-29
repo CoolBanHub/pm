@@ -34,8 +34,9 @@ All default data lives under `~/.pm`:
 | `~/.pm/logs/pm-daemon.log` | daemon log when started with `-d` |
 | `~/.pm/logs/<name>.log` | a managed process' stdout/stderr (when configured) |
 
-To override the config location, pass `-config FILE`. A `pm.yaml` in the current
-directory takes priority over `~/.pm/pm.yaml` when `-config` is omitted.
+To override the config location, pass `-config FILE`. When it is omitted, PM
+always uses `~/.pm/pm.yaml`; current-directory YAML files are never selected
+implicitly.
 
 ## Commands
 
@@ -72,8 +73,8 @@ untouched. Use `reload` to add or remove programs.
 On Linux, `sudo pm systemd` installs the current binary as
 `/usr/local/bin/pm`, writes `/etc/systemd/system/pm.service`, enables it at boot,
 and hands an existing daemon over to systemd. The service runs as the original
-sudo user and uses a current-directory `pm.yaml` when present, otherwise that
-user's `~/.pm/pm.yaml`. Pass `-config FILE` to choose another file.
+sudo user and uses that user's `~/.pm/pm.yaml`. Pass `-config FILE` to choose
+another file.
 
 `pm update` queries the latest stable GitHub Release. If its tag equals the
 compiled-in current version, no files are downloaded. Otherwise PM downloads
@@ -91,7 +92,8 @@ paused nor disabled. Detached daemons must be restarted with `pm down` followed
 by `pm up -d`.
 
 CLI socket resolution order: `-socket PATH` flag → `PM_SOCKET` env → `socket`
-field from the config → `~/.pm/pm.sock`.
+field from `~/.pm/pm.yaml` → `~/.pm/pm.sock`. A current-directory `pm.yaml`
+does not alter the control socket.
 
 ## Configuration
 

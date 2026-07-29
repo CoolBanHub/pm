@@ -44,7 +44,19 @@ func TestLoadDaemonConfigUsesDefaultsOnlyWhenOptional(t *testing.T) {
 	}
 }
 
-func TestResolveControlSocketPriorityAndCurrentConfig(t *testing.T) {
+func TestDefaultConfigPathIgnoresCurrentConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, config.DefaultFile), []byte("socket: run/pm.sock\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	if got, want := defaultConfigPath(), config.DefaultConfigPath(); got != want {
+		t.Fatalf("default config path = %q, want %q", got, want)
+	}
+}
+
+func TestResolveControlSocketPriorityAndDefaultConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultFile)
 	if err := os.WriteFile(path, []byte("socket: run/pm.sock\nweb:\n  enabled: false\n"), 0o600); err != nil {

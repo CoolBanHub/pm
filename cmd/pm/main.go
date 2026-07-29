@@ -156,16 +156,9 @@ func daemonCommand(args []string) error {
 	return serveDaemon(absoluteConfig, cfg)
 }
 
-// defaultConfigPath picks the configuration file used when -config is omitted:
-// a pm.yaml in the current directory wins (backward-compatible project-local
-// usage), otherwise the home default ~/.pm/pm.yaml is used.
+// defaultConfigPath returns the single implicit configuration location.
+// Project-local configurations must be selected explicitly with -config.
 func defaultConfigPath() string {
-	if workingDirectory, err := os.Getwd(); err == nil {
-		candidate := filepath.Join(workingDirectory, config.DefaultFile)
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
-	}
 	return config.DefaultConfigPath()
 }
 

@@ -128,12 +128,6 @@ func systemdIdentity() (serviceIdentity, error) {
 }
 
 func defaultSystemdConfigPath(home string) string {
-	if workingDirectory, err := os.Getwd(); err == nil {
-		candidate := filepath.Join(workingDirectory, config.DefaultFile)
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
-	}
 	return filepath.Join(home, ".pm", config.DefaultFile)
 }
 
