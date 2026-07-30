@@ -364,12 +364,11 @@ tbody tr:hover { background: var(--surface-hover); }
 th:nth-child(2) { width: var(--name-column-width, 14%); } th:nth-child(3) { width: 7%; } th:nth-child(4) { width: 4%; }
 th:nth-child(5), th:nth-child(7), th:nth-child(10), th:nth-child(12), th:nth-child(13) { width: 5%; }
 th:nth-child(6) { width: 7%; } th:nth-child(8) { width: 7%; } th:nth-child(9) { width: 8%; } th:nth-child(11) { width: 6%; } th:last-child { width: 17%; }
-td.check-column { text-align: center; }
+td.check-column { padding-left: 0; padding-right: 0; text-align: center; text-overflow: clip; }
 input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 
 .process-name { color: var(--ink); font-weight: 620; border: 0; padding: 0; background: none; text-align: left; max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-size: 13.5px; transition: color .15s; }
 .process-name:hover { color: var(--accent); }
-.process-command { display: block; color: var(--faint); font-size: 11px; margin-top: 3px; font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; }
 .process-description { display: block; color: var(--faint); font-size: 11px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }
 .metric { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
 .group-tag { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); background: var(--surface-2); font-size: 11px; font-weight: 500; }
@@ -590,7 +589,7 @@ body.hide-col-restarts .col-restarts, body.hide-col-restarts .cell-restarts { di
   .status-badge.compact.status-fatal { background: var(--red-soft); border-color: transparent; }
   .status-badge.compact::before { width: 6px; height: 6px; }
 
-  /* top row: checkbox / name(+command) / status */
+  /* top row: checkbox / name / status */
   .check-column { order: 0; align-self: flex-start; padding-top: 2px; flex-shrink: 0; }
   .cell-name { order: 1; flex: 1 1 58%; min-width: 0; flex-direction: column; align-items: flex-start; gap: 2px; }
   .cell-state { order: 2; flex-shrink: 0; }
@@ -611,15 +610,6 @@ body.hide-col-restarts .col-restarts, body.hide-col-restarts .cell-restarts { di
     font-size: 10.5px;
     margin-right: 5px;
     white-space: nowrap;
-  }
-
-  /* let long commands wrap within a card, clamped to two lines */
-  .process-command {
-    white-space: normal;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
   }
 
   /* skeleton rows look tidy as cards too */

@@ -239,7 +239,7 @@ $$('th[data-sort]').forEach(th => th.addEventListener('click', () => {
 function rowMarkup(process, animate) {
   return `<tr data-name="${escapeAttr(process.name)}" class="${animate ? 'is-entering' : ''}">
     <td class="check-column"><input type="checkbox" data-select="${escapeAttr(process.name)}" aria-label="选择 ${escapeAttr(process.name)}" ${state.selectedNames.has(process.name) ? 'checked' : ''}></td>
-    <td class="cell-name"><button class="process-name" data-detail="${escapeAttr(process.name)}" title="${escapeAttr(process.description ? `${process.name} — ${process.description}` : process.name)}">${escapeHTML(process.name)}</button>${process.description ? `<span class="process-description">${escapeHTML(process.description)}</span>` : ''}<span class="process-command">${escapeHTML(commandText(process))}</span></td>
+    <td class="cell-name"><button class="process-name" data-detail="${escapeAttr(process.name)}" title="${escapeAttr(process.description ? `${process.name} — ${process.description}` : process.name)}">${escapeHTML(process.name)}</button>${process.description ? `<span class="process-description">${escapeHTML(process.description)}</span>` : ''}</td>
     <td class="cell-group" data-label="分组"><button class="group-tag group-button" data-edit-group="${escapeAttr(process.name)}" title="${escapeAttr(process.group || 'default')}">${escapeHTML(process.group || 'default')}</button></td>
     <td class="cell-state" data-label="状态">${statusBadge(process.state, '', process.paused, true)}</td>
     <td class="num-col cell-pid" data-label="PID"><span class="metric">${process.pid || '-'}</span></td>
