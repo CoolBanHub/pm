@@ -11,7 +11,7 @@ const STATE_ORDER = { RUNNING: 0, BACKOFF: 1, STOPPING: 2, STARTING: 3, STOPPED:
 
 // 可隐藏的列：key 对应 body.hide-col-<key>、th.col-<key>、td.cell-<key>
 const COLUMNS = [
-  { key: 'group', label: '分组', width: 7 },
+  { key: 'group', label: '分组', width: 12 },
   { key: 'pid', label: 'PID', width: 5 },
   { key: 'ports', label: 'TCP 端口', width: 7 },
   { key: 'cpu', label: 'CPU', width: 5 },
@@ -30,13 +30,15 @@ function loadHiddenCols() {
 function saveHiddenCols() { localStorage.setItem('pm-columns', JSON.stringify([...state.hiddenCols])); }
 
 const state = {
-  token: sessionStorage.getItem('pm-token') || '',
+  token: sessionStorage.getItem('pm-session') || '',
+  authRequired: false, pollStarted: false,
   processes: [], events: [],
   filter: 'all', groupFilter: 'all', query: '',
   selected: null, selectedNames: new Set(), editingName: null,
   logController: null, logPaused: false, confirmAction: null,
   logContent: '', logQuery: '', logMatchIndex: -1,
   moreMenuName: null,
+  restartEvents: new Map(),
   // new
   sortKey: 'name', sortDir: 'asc',
   lastSig: '', lastCount: -1, firstLoad: true,
@@ -51,7 +53,12 @@ async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
   const contentType = response.headers.get('content-type') || '';
   const body = contentType.includes('application/json') ? await response.json() : null;
-  if (!response.ok) throw new Error(body?.error || `请求失败 (${response.status})`);
+  if (!response.ok) {
+    if (response.status === 401 && state.token && path !== '/api/v1/login') sessionExpired();
+    const error = new Error(body?.error || `请求失败 (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return body;
 }
 
@@ -61,28 +68,60 @@ async function api(path, options = {}) {
 async function bootstrap() {
   initTheme();
   try {
-    await api('/api/v1/session');
-    showApp();
+    const session = await api('/api/v1/session');
+    state.authRequired = !!session.auth_required;
+    if (session.authenticated) showApp();
+    else if (state.authRequired) showAuth();
+    else showApp();
   } catch (error) {
-    if (error.message.includes('token')) showAuth();
-    else { showApp(); setConnection(false, error.message); }
+    showApp(); setConnection(false, error.message);
   }
 }
 
 function showAuth() { $('#auth-view').classList.remove('hidden'); $('#app').classList.add('hidden'); }
 function showApp() {
   $('#auth-view').classList.add('hidden'); $('#app').classList.remove('hidden');
+  $('#logout').classList.toggle('hidden', !state.authRequired);
   applyColumnVisibility();
   renderSkeleton();
   refreshAll();
-  setInterval(loadProcesses, 2000);
-  setInterval(loadEvents, 5000);
+  if (!state.pollStarted) {
+    state.pollStarted = true;
+    setInterval(loadProcesses, 2000);
+    setInterval(loadEvents, 5000);
+  }
 }
 
+function clearSession() {
+  state.token = '';
+  sessionStorage.removeItem('pm-session');
+}
+
+function sessionExpired() {
+  if ($('#auth-view') && !$('#auth-view').classList.contains('hidden')) return;
+  clearSession();
+  $('#auth-error').textContent = '会话已过期，请重新登录';
+  showAuth();
+}
+
+$('#logout').addEventListener('click', async () => {
+  try { await api('/api/v1/logout', { method: 'POST' }); } catch { /* 会话可能已失效 */ }
+  clearSession();
+  $('#auth-error').textContent = '';
+  showAuth();
+});
+
 $('#auth-form').addEventListener('submit', async (event) => {
-  event.preventDefault(); state.token = $('#token-input').value;
+  event.preventDefault();
+  $('#auth-error').textContent = '';
   try {
-    await api('/api/v1/session'); sessionStorage.setItem('pm-token', state.token); showApp();
+    const result = await api('/api/v1/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: $('#username-input').value.trim(), password: $('#password-input').value }),
+    });
+    state.token = result.token;
+    sessionStorage.setItem('pm-session', state.token);
+    showApp();
   } catch (error) { $('#auth-error').textContent = error.message; }
 });
 
@@ -106,7 +145,10 @@ async function loadProcesses() {
   } catch (error) { setConnection(false, error.message); }
 }
 async function loadEvents() {
-  try { const data = await api('/api/v1/events?limit=200'); state.events = data.events || []; renderEvents(); }
+  try {
+    const data = await api('/api/v1/events?limit=200'); state.events = data.events || []; renderEvents();
+    if (state.selected) loadRestartEvents(state.selected.name);
+  }
   catch (error) { toast(error.message, true); }
 }
 
@@ -349,10 +391,20 @@ function rowActionButtons(process) {
 
 function moreMenuMarkup(process) {
   const pause = process.paused ? '' : `<button role="menuitem" data-action="pause" data-name="${escapeAttr(process.name)}"><span>暂停</span></button>`;
-  const remove = process.paused ? `<button role="menuitem" class="danger" data-delete="${escapeAttr(process.name)}"><span>删除</span></button>` : '';
+  const resetRestarts = process.restarts > 0 ? `<button role="menuitem" data-action="reset-restarts" data-name="${escapeAttr(process.name)}"><span>清零重启数</span></button>` : '';
   return `<button role="menuitem" data-logs="${escapeAttr(process.name)}"><span>查看日志</span></button>
     <button role="menuitem" data-edit="${escapeAttr(process.name)}"><span>编辑配置</span></button>
-    ${pause}${remove}`;
+    ${resetRestarts}${pause}<button role="menuitem" class="danger" data-delete="${escapeAttr(process.name)}"><span>删除</span></button>`;
+}
+
+// 运行中（或正在启动/停止/退避重试）的进程删除前会先被停止
+function isProcessActive(process) {
+  return ['RUNNING', 'BACKOFF', 'STARTING', 'STOPPING'].includes(process.state);
+}
+
+function deleteConfirmText(name, process) {
+  if (process && isProcessActive(process)) return `进程 ${name} 正在运行，删除会先停止它并从配置中移除，确认删除？`;
+  return `确认删除进程 ${name}？将停止该进程并从配置中移除。`;
 }
 
 function closeMoreMenu() {
@@ -406,8 +458,9 @@ $('#row-more-menu').addEventListener('click', event => {
   if (edit) { closeMoreMenu(); return openProcessForm(edit.dataset.edit); }
   const remove = event.target.closest('[data-delete]');
   if (remove) {
+    const process = state.processes.find(item => item.name === remove.dataset.delete);
     closeMoreMenu();
-    return confirm(`确认删除已暂停的进程 ${remove.dataset.delete}？`, () => deleteProcess(remove.dataset.delete));
+    return confirm(deleteConfirmText(remove.dataset.delete, process), () => deleteProcess(remove.dataset.delete));
   }
   const action = event.target.closest('[data-action]');
   if (action) { closeMoreMenu(); return requestAction(action.dataset.action, action.dataset.name); }
@@ -443,7 +496,7 @@ $('#selection-clear').addEventListener('click', () => { state.selectedNames.clea
 function applyColumnVisibility() {
   COLUMNS.forEach(({ key }) => document.body.classList.toggle(`hide-col-${key}`, state.hiddenCols.has(key)));
   const reclaimedWidth = COLUMNS.reduce((sum, column) => sum + (state.hiddenCols.has(column.key) ? column.width : 0), 0);
-  document.documentElement.style.setProperty('--name-column-width', `calc(${19 + reclaimedWidth}% - 42px)`);
+  document.documentElement.style.setProperty('--name-column-width', `calc(${14 + reclaimedWidth}% - 42px)`);
 }
 function renderColumnMenu() {
   $('#column-menu').innerHTML = COLUMNS.map(({ key, label }) =>
@@ -484,11 +537,11 @@ $('#column-menu').addEventListener('change', (event) => {
    Actions (start / stop / restart / bulk)
    ============================================================ */
 async function requestAction(action, name = 'all') {
-  const destructive = action === 'stop' || action === 'restart' || action === 'pause';
+  const destructive = action === 'stop' || action === 'restart' || action === 'reset-restarts' || action === 'pause';
   if (destructive) {
     const target = name === 'all' ? '全部进程' : name;
-    const label = { stop: '停止', restart: '重启', pause: '暂停' }[action];
-    return confirm(`确认${label} ${target}？`, () => runAction(action, name));
+    const message = action === 'reset-restarts' ? `确认将 ${target} 的重启数清零？` : `确认${{ stop: '停止', restart: '重启', pause: '暂停' }[action]} ${target}？`;
+    return confirm(message, () => runAction(action, name));
   }
   return runAction(action, name);
 }
@@ -496,12 +549,14 @@ async function runAction(action, name) {
   try {
     const path = name === 'all' ? `/api/v1/actions/${action}` : `/api/v1/processes/${encodeURIComponent(name)}/${action}`;
     const result = await api(path, { method: 'POST' });
+    if (action === 'restart') state.restartEvents.clear();
     toast(result.message || '操作完成'); spinRefresh(); await loadProcesses();
   } catch (error) { toast(error.message, true); }
 }
 async function runBulkAction(action, names) {
   try {
     const result = await api(`/api/v1/actions/${action}`, { method: 'POST', body: JSON.stringify({ names }) });
+    if (action === 'restart') state.restartEvents.clear();
     toast(result.message || '批量操作完成'); state.selectedNames.clear(); $('#bulk-action').value = ''; await loadProcesses();
   } catch (error) { toast(error.message, true); }
 }
@@ -512,9 +567,9 @@ $('#bulk-apply').addEventListener('click', () => {
   const names = [...state.selectedNames];
   if (!names.length) return toast('请先选择进程', true);
   const execute = () => runBulkAction(action, names);
-  if (action === 'stop' || action === 'restart' || action === 'pause') {
-    const label = { stop: '停止', restart: '重启', pause: '暂停' }[action];
-    confirm(`确认${label}选中的 ${names.length} 个进程？`, execute);
+  if (action === 'stop' || action === 'restart' || action === 'reset-restarts' || action === 'pause') {
+    const message = action === 'reset-restarts' ? `确认将选中的 ${names.length} 个进程重启数清零？` : `确认${{ stop: '停止', restart: '重启', pause: '暂停' }[action]}选中的 ${names.length} 个进程？`;
+    confirm(message, execute);
   }
   else execute();
 });
@@ -531,7 +586,7 @@ function spinRefresh() {
 function openDrawer(name, tab = 'overview') {
   state.selected = state.processes.find(p => p.name === name); if (!state.selected) return;
   $('#drawer-backdrop').classList.remove('hidden'); $('#process-drawer').classList.add('open');
-  $('#process-drawer').setAttribute('aria-hidden', 'false'); renderDrawer(); switchTab(tab);
+  $('#process-drawer').setAttribute('aria-hidden', 'false'); renderDrawer(); switchTab(tab); loadRestartEvents(name);
 }
 function closeDrawer() {
   stopLogStream(); $('#drawer-backdrop').classList.add('hidden'); $('#process-drawer').classList.remove('open');
@@ -549,13 +604,14 @@ function renderDrawer() {
     ${detail('运行时间', p.uptime || '-')}${detail('启动次数', p.starts)}${detail('重启次数', p.restarts)}${detail('重启策略', p.restart_policy)}
     ${detail('命令', commandText(p), true)}${detail('工作目录', p.directory || '-', true)}${detail('标准输出', p.stdout_log || '未配置', true)}${detail('标准错误', p.stderr_log || '未配置', true)}
     ${p.last_error ? detail('最近错误', p.last_error, true) : ''}</div>`;
-  const deleteHint = p.paused ? '删除进程' : '请先暂停进程后再删除';
-  $('#drawer-actions').innerHTML = `<button class="button quiet" data-delete="${escapeAttr(p.name)}" title="${deleteHint}" ${p.paused ? '' : 'disabled'}>删除</button><button class="button secondary" data-edit="${escapeAttr(p.name)}">编辑配置</button>${actionButtons(p)}`;
+  const resetRestarts = p.restarts > 0 ? `<button class="button quiet" data-action="reset-restarts" data-name="${escapeAttr(p.name)}">清零重启数</button>` : '';
+  $('#drawer-actions').innerHTML = `<button class="button quiet" data-delete="${escapeAttr(p.name)}" title="删除进程">删除</button>${resetRestarts}<button class="button secondary" data-edit="${escapeAttr(p.name)}">编辑配置</button>${actionButtons(p)}`;
   renderDrawerEvents();
+  renderDrawerRestarts();
 }
 $('#drawer-actions').addEventListener('click', e => {
   const edit = e.target.closest('[data-edit]'); if (edit) return openProcessForm(edit.dataset.edit);
-  const remove = e.target.closest('[data-delete]'); if (remove) return confirm(`确认删除已暂停的进程 ${remove.dataset.delete}？`, () => deleteProcess(remove.dataset.delete));
+  const remove = e.target.closest('[data-delete]'); if (remove) return confirm(deleteConfirmText(remove.dataset.delete, state.selected), () => deleteProcess(remove.dataset.delete));
   const logs = e.target.closest('[data-logs]'); if (logs) return switchTab('logs');
   const button = e.target.closest('[data-action]'); if (button) requestAction(button.dataset.action, button.dataset.name);
 });
@@ -570,14 +626,65 @@ function switchTab(tab) {
 /* ============================================================
    Events
    ============================================================ */
-function renderEvents() { $('#event-list').innerHTML = eventMarkup(state.events.slice(0, 50)); renderDrawerEvents(); }
+function renderEvents() { replaceEventMarkup($('#event-list'), eventMarkup(state.events.slice(0, 50))); renderDrawerEvents(); }
 function renderDrawerEvents() {
   if (!state.selected) return;
-  $('#drawer-events').innerHTML = eventMarkup(state.events.filter(e => e.program === state.selected.name));
+  replaceEventMarkup($('#drawer-events'), eventMarkup(state.events.filter(e => e.program === state.selected.name)));
+}
+function renderDrawerRestarts() {
+  if (!state.selected) return;
+  const events = state.restartEvents.get(state.selected.name)
+    || state.events.filter(event => event.program === state.selected.name && event.type === 'restart');
+  const markup = events.length
+    ? events.map(restartEventMarkup).join('')
+    : '<div class="empty-state compact">暂无重启记录</div>';
+  replaceEventMarkup($('#drawer-restarts'), markup);
+}
+async function loadRestartEvents(name) {
+  try {
+    const query = new URLSearchParams({ program: name, type: 'restart', limit: '200' });
+    const data = await api(`/api/v1/events?${query}`);
+    state.restartEvents.set(name, data.events || []);
+    if (state.selected?.name === name) renderDrawerRestarts();
+  } catch (error) { toast(error.message, true); }
 }
 function eventMarkup(events) {
   if (!events.length) return '<div class="empty-state compact">暂无事件</div>';
-  return events.map(event => `<div class="event-item"><span class="event-time">${formatDate(event.time)}</span><strong>${escapeHTML(event.program || 'daemon')}</strong><span class="event-type">${escapeHTML(event.type)}</span><span class="event-message">${escapeHTML(event.message || event.state || '')}</span></div>`).join('');
+  return events.map(event => event.type === 'restart' && event.restart
+    ? restartEventMarkup(event)
+    : `<div class="event-item"><span class="event-time">${formatDate(event.time)}</span><strong>${escapeHTML(event.program || 'daemon')}</strong><span class="event-type">${escapeHTML(eventTypeLabel(event.type))}</span><span class="event-message">${escapeHTML(event.message || event.state || '')}</span></div>`).join('');
+}
+function replaceEventMarkup(container, markup) {
+  const openRecords = new Set([...container.querySelectorAll('.restart-record[open]')].map(item => item.dataset.eventId));
+  const openLogs = new Set([...container.querySelectorAll('.restart-log[open]')].map(item => `${item.closest('.restart-record')?.dataset.eventId}:${item.dataset.stream}`));
+  container.innerHTML = markup;
+  container.querySelectorAll('.restart-record').forEach(item => { if (openRecords.has(item.dataset.eventId)) item.open = true; });
+  container.querySelectorAll('.restart-log').forEach(item => {
+    const key = `${item.closest('.restart-record')?.dataset.eventId}:${item.dataset.stream}`;
+    if (openLogs.has(key)) item.open = true;
+  });
+}
+function restartEventMarkup(event) {
+  const restart = event.restart || {};
+  const trigger = { automatic: '自动重启', manual: '手动重启', configuration: '配置变更' }[restart.trigger] || restart.trigger || '重启';
+  const exitCode = Number.isInteger(restart.exit_code) ? restart.exit_code : '-';
+  const error = restart.error ? `<div class="restart-error"><span>错误</span><code>${escapeHTML(restart.error)}</code></div>` : '';
+  const logs = restartLogMarkup('标准错误', 'stderr', restart.stderr_log, restart.stderr_tail)
+    + restartLogMarkup('标准输出', 'stdout', restart.stdout_log, restart.stdout_tail);
+  return `<details class="restart-record" data-event-id="${Number(event.id) || 0}">
+    <summary><span class="event-time">${formatDate(event.time)}</span><strong>${escapeHTML(event.program || 'daemon')}</strong><span class="restart-trigger">${escapeHTML(trigger)}</span><span class="event-message">${escapeHTML(restart.reason || event.message || '')}</span></summary>
+    <div class="restart-snapshot">
+      <div class="restart-meta"><div><span>旧 PID</span><code>${restart.previous_pid || '-'}</code></div><div><span>运行时长</span><code>${escapeHTML(restart.uptime || '-')}</code></div><div><span>退出码</span><code>${exitCode}</code></div><div><span>启动时间</span><code>${restart.started_at ? formatDate(restart.started_at) : '-'}</code></div></div>
+      ${error}${logs || '<div class="restart-no-logs">未捕获到重启前日志</div>'}
+    </div>
+  </details>`;
+}
+function restartLogMarkup(label, stream, path, content) {
+  if (!content) return '';
+  return `<details class="restart-log" data-stream="${stream}"><summary><span>${label}</span><code>${escapeHTML(path || '')}</code></summary><pre>${escapeHTML(content)}</pre></details>`;
+}
+function eventTypeLabel(type) {
+  return ({ started: '启动', exited: '退出', stopped: '停止', stopping: '停止中', backoff: '等待重启', fatal: '异常', configured: '配置变更', restarts_reset: '重启数清零' })[type] || type;
 }
 
 /* ============================================================

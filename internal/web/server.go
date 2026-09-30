@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
@@ -39,17 +40,36 @@ type Backend interface {
 	ConfigPath() string
 }
 
+// defaultSessionTTL is how long a login session stays valid; activity slides
+// the deadline forward.
+const defaultSessionTTL = 24 * time.Hour
+
+// loginFailureDelay slows down credential brute-forcing.
+const loginFailureDelay = 500 * time.Millisecond
+
 type Server struct {
-	listen   string
-	token    string
-	backend  Backend
-	logger   *log.Logger
-	http     *http.Server
-	configMu sync.Mutex
+	listen     string
+	username   string
+	password   string
+	backend    Backend
+	logger     *log.Logger
+	http       *http.Server
+	configMu   sync.Mutex
+	sessionMu  sync.Mutex
+	sessions   map[string]time.Time // sha256(token) -> expiry
+	sessionTTL time.Duration
 }
 
-func NewServer(listen, token string, backend Backend, logger *log.Logger) *Server {
-	server := &Server{listen: listen, token: token, backend: backend, logger: logger}
+func NewServer(listen, username, password string, backend Backend, logger *log.Logger) *Server {
+	server := &Server{
+		listen:     listen,
+		username:   username,
+		password:   password,
+		backend:    backend,
+		logger:     logger,
+		sessions:   make(map[string]time.Time),
+		sessionTTL: defaultSessionTTL,
+	}
 	server.http = &http.Server{
 		Addr:              listen,
 		Handler:           server.routes(),
@@ -81,7 +101,9 @@ func (s *Server) Serve(ctx context.Context) error {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /api/v1/session", s.api(s.handleSession))
+	mux.HandleFunc("POST /api/v1/login", s.public(s.handleLogin))
+	mux.HandleFunc("POST /api/v1/logout", s.api(s.handleLogout))
+	mux.HandleFunc("GET /api/v1/session", s.public(s.handleSession))
 	mux.HandleFunc("GET /api/v1/processes", s.api(s.handleProcesses))
 	mux.HandleFunc("GET /api/v1/processes/{name}/config", s.api(s.handleGetProcessConfig))
 	mux.HandleFunc("POST /api/v1/processes", s.api(s.handleCreateProcess))
@@ -180,16 +202,27 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// public wraps handlers that must stay reachable without a session (login,
+// the session probe) while keeping the same-origin protection for writes.
+func (s *Server) public(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
+			writeError(w, http.StatusForbidden, "request origin does not match this server")
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) api(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if s.token != "" {
-			provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if len(provided) != len(s.token) || subtle.ConstantTimeCompare([]byte(provided), []byte(s.token)) != 1 {
-				writeError(w, http.StatusUnauthorized, "invalid access token")
-				return
-			}
+		if s.authEnabled() && !s.validSession(r) {
+			writeError(w, http.StatusUnauthorized, "invalid session token")
+			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
 			writeError(w, http.StatusForbidden, "request origin does not match this server")
@@ -199,8 +232,106 @@ func (s *Server) api(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) handleSession(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "token_required": s.token != ""})
+func (s *Server) authEnabled() bool {
+	return s.username != "" && s.password != ""
+}
+
+// validSession reports whether the request carries a live session token and
+// slides its expiry forward on success.
+func (s *Server) validSession(r *http.Request) bool {
+	provided := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if provided == "" {
+		return false
+	}
+	key := sessionKey(provided)
+	now := time.Now()
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	expiry, exists := s.sessions[key]
+	if !exists || !now.Before(expiry) {
+		if exists {
+			delete(s.sessions, key)
+		}
+		return false
+	}
+	s.sessions[key] = now.Add(s.sessionTTL)
+	return true
+}
+
+func sessionKey(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:])
+}
+
+// credentialsMatch compares both fields in constant time via their SHA-256
+// digests so neither lengths nor early mismatches leak through timing.
+func (s *Server) credentialsMatch(username, password string) bool {
+	userMatch := subtle.ConstantTimeCompare(digest(s.username), digest(username))
+	passMatch := subtle.ConstantTimeCompare(digest(s.password), digest(password))
+	return userMatch == 1 && passMatch == 1
+}
+
+func digest(value string) []byte {
+	sum := sha256.Sum256([]byte(value))
+	return sum[:]
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.authEnabled() {
+		writeError(w, http.StatusConflict, "web authentication is not configured")
+		return
+	}
+	var credentials struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decodeBody(r, &credentials); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.credentialsMatch(credentials.Username, credentials.Password) {
+		time.Sleep(loginFailureDelay)
+		writeError(w, http.StatusUnauthorized, "invalid username or password")
+		return
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		writeError(w, http.StatusInternalServerError, "generate session token")
+		return
+	}
+	token := hex.EncodeToString(raw)
+	expiresAt := time.Now().Add(s.sessionTTL)
+	s.sessionMu.Lock()
+	s.pruneSessionsLocked(time.Now())
+	s.sessions[sessionKey(token)] = expiresAt
+	s.sessionMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "expires_at": expiresAt.UTC().Format(time.RFC3339)})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if s.authEnabled() {
+		provided := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		if provided != "" {
+			s.sessionMu.Lock()
+			delete(s.sessions, sessionKey(provided))
+			s.sessionMu.Unlock()
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
+}
+
+// pruneSessionsLocked removes expired sessions; s.sessionMu must be held.
+func (s *Server) pruneSessionsLocked(now time.Time) {
+	for key, expiry := range s.sessions {
+		if !now.Before(expiry) {
+			delete(s.sessions, key)
+		}
+	}
+}
+
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	authenticated := !s.authEnabled() || s.validSession(r)
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": authenticated, "auth_required": s.authEnabled()})
 }
 
 func (s *Server) handleProcesses(w http.ResponseWriter, _ *http.Request) {
@@ -219,7 +350,7 @@ func (s *Server) handleProcesses(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleProcessAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
-	if action != "start" && action != "stop" && action != "restart" && action != "pause" && action != "resume" {
+	if action != "start" && action != "stop" && action != "restart" && action != "reset-restarts" && action != "pause" && action != "resume" {
 		writeError(w, http.StatusNotFound, "unknown process action")
 		return
 	}
@@ -293,6 +424,9 @@ func (s *Server) handleUpdateProcess(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"message": "process updated", "program": program})
 }
 
+// handleDeleteProcess removes a program from the configuration and reloads.
+// The reload stops a still-running process (Manager.Apply stops programs that
+// disappear from the config), so deletion works without pausing first.
 func (s *Server) handleDeleteProcess(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	status := s.backend.Execute(control.Request{Action: "status", Names: []string{name}})
@@ -302,10 +436,6 @@ func (s *Server) handleDeleteProcess(w http.ResponseWriter, r *http.Request) {
 			message = fmt.Sprintf("unknown program %q", name)
 		}
 		writeError(w, http.StatusNotFound, message)
-		return
-	}
-	if !status.Processes[0].Paused {
-		writeError(w, http.StatusConflict, fmt.Sprintf("program %q must be paused before deletion", name))
 		return
 	}
 	err := s.updatePrograms(func(programs []config.Program) ([]config.Program, error) {
@@ -332,7 +462,7 @@ func (s *Server) handleDeleteProcess(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
-	if action != "start" && action != "stop" && action != "restart" && action != "pause" && action != "resume" && action != "reload" {
+	if action != "start" && action != "stop" && action != "restart" && action != "reset-restarts" && action != "pause" && action != "resume" && action != "reload" {
 		writeError(w, http.StatusNotFound, "unknown bulk action")
 		return
 	}
@@ -422,7 +552,30 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": s.backend.Events(after, limit)})
+	program := r.URL.Query().Get("program")
+	eventType := r.URL.Query().Get("type")
+	fetchLimit := limit
+	if program != "" || eventType != "" {
+		fetchLimit = 1000
+	}
+	events := s.backend.Events(after, fetchLimit)
+	if program != "" || eventType != "" {
+		filtered := make([]supervisor.Event, 0, limit)
+		for _, event := range events {
+			if program != "" && event.Program != program {
+				continue
+			}
+			if eventType != "" && event.Type != eventType {
+				continue
+			}
+			filtered = append(filtered, event)
+			if len(filtered) == limit {
+				break
+			}
+		}
+		events = filtered
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
 func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {

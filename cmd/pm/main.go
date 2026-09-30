@@ -73,7 +73,7 @@ func run(args []string) error {
 		return systemdCommand(args)
 	case "update":
 		return updateCommand(args)
-	case "status", "start", "stop", "restart", "pause", "resume", "disable", "enable":
+	case "status", "start", "stop", "restart", "reset-restarts", "pause", "resume", "disable", "enable":
 		resolvedSocket, err := resolveControlSocket(*socket)
 		if err != nil {
 			return err
@@ -236,13 +236,7 @@ func serveDaemon(configPath string, cfg config.Config) error {
 	serviceCount := 1
 	go func() { results <- serviceResult{name: "control", err: server.Serve(ctx)} }()
 	if cfg.Web.Enabled {
-		token, tokenErr := cfg.Web.ResolvedToken()
-		if tokenErr != nil {
-			cancel()
-			<-results
-			return tokenErr
-		}
-		webServer := webui.NewServer(cfg.Web.Listen, token, server, logger)
+		webServer := webui.NewServer(cfg.Web.Listen, cfg.Web.Username, cfg.Web.Password, server, logger)
 		serviceCount++
 		go func() { results <- serviceResult{name: "web", err: webServer.Serve(ctx)} }()
 	}
@@ -337,12 +331,9 @@ func webReady(cfg config.Web) bool {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
-	request, err := http.NewRequest(http.MethodGet, "http://"+net.JoinHostPort(host, port)+"/api/v1/session", nil)
+	request, err := http.NewRequest(http.MethodGet, "http://"+net.JoinHostPort(host, port)+"/healthz", nil)
 	if err != nil {
 		return false
-	}
-	if token, err := cfg.ResolvedToken(); err == nil && token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	client := http.Client{Timeout: 300 * time.Millisecond}
 	response, err := client.Do(request)
@@ -618,6 +609,7 @@ func usage(writer io.Writer) {
   pm [-socket PATH] status [NAME...]
   pm [-socket PATH] list [NAME...]
   pm [-socket PATH] start|stop|restart NAME|all
+  pm [-socket PATH] reset-restarts NAME|all
   pm [-socket PATH] pause|resume|disable|enable NAME|all
   pm [-socket PATH] reload|shutdown|down
   pm [-socket PATH] logs [-n LINES] [-f] [-stderr] NAME

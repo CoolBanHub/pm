@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/CoolBanHub/pm/internal/config"
 	"github.com/CoolBanHub/pm/internal/control"
@@ -23,6 +25,7 @@ type fakeBackend struct {
 	configPath string
 	requests   []control.Request
 	statuses   []supervisor.Status
+	events     []supervisor.Event
 }
 
 func (f *fakeBackend) Execute(request control.Request) control.Response {
@@ -36,28 +39,40 @@ func (f *fakeBackend) Execute(request control.Request) control.Response {
 }
 
 func (f *fakeBackend) Events(uint64, int) []supervisor.Event {
+	if f.events != nil {
+		return f.events
+	}
 	return []supervisor.Event{{ID: 1, Program: "api", Type: "started"}}
 }
 
 func (f *fakeBackend) ConfigPath() string { return f.configPath }
 
-func TestAPIAuthenticationAndOriginProtection(t *testing.T) {
+func TestLoginSessionAuthenticationAndOriginProtection(t *testing.T) {
 	backend := &fakeBackend{statuses: []supervisor.Status{{Name: "api", State: supervisor.StateRunning, PID: os.Getpid()}}}
-	server := NewServer("", "secret", backend, log.New(io.Discard, "", 0))
+	server := NewServer("", "admin", "secret", backend, log.New(io.Discard, "", 0))
 	httpServer := httptest.NewServer(server.routes())
 	defer httpServer.Close()
 
-	response, err := http.Get(httpServer.URL + "/api/v1/session")
+	response, err := http.Get(httpServer.URL + "/api/v1/processes")
 	if err != nil {
 		t.Fatal(err)
 	}
 	response.Body.Close()
 	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthorized status = %d", response.StatusCode)
+		t.Fatalf("unauthenticated status = %d", response.StatusCode)
+	}
+
+	if status, _ := login(t, httpServer.URL, "admin", "wrong"); status != http.StatusUnauthorized {
+		t.Fatalf("wrong password status = %d", status)
+	}
+
+	status, token := login(t, httpServer.URL, "admin", "secret")
+	if status != http.StatusOK || token == "" {
+		t.Fatalf("login = %d token=%q", status, token)
 	}
 
 	request, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/api/v1/processes/api/restart", nil)
-	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Origin", "https://attacker.example")
 	response, err = http.DefaultClient.Do(request)
 	if err != nil {
@@ -69,7 +84,7 @@ func TestAPIAuthenticationAndOriginProtection(t *testing.T) {
 	}
 
 	request, _ = http.NewRequest(http.MethodPost, httpServer.URL+"/api/v1/processes/api/restart", nil)
-	request.Header.Set("Authorization", "Bearer secret")
+	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Origin", httpServer.URL)
 	response, err = http.DefaultClient.Do(request)
 	if err != nil {
@@ -79,10 +94,98 @@ func TestAPIAuthenticationAndOriginProtection(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("same-origin status = %d", response.StatusCode)
 	}
+
+	request, _ = http.NewRequest(http.MethodPost, httpServer.URL+"/api/v1/logout", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Origin", httpServer.URL)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("logout status = %d", response.StatusCode)
+	}
+
+	request, _ = http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/processes", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("post-logout status = %d", response.StatusCode)
+	}
+}
+
+func login(t *testing.T, base, username, password string) (int, string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"username":%q,"password":%q}`, username, password)
+	response, err := http.Post(base+"/api/v1/login", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Token string `json:"token"`
+	}
+	if response.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return response.StatusCode, payload.Token
+}
+
+func TestSessionProbeAndExpiry(t *testing.T) {
+	server := NewServer("", "admin", "secret", &fakeBackend{}, log.New(io.Discard, "", 0))
+	server.sessionTTL = -time.Second
+	handler := server.routes()
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"auth_required":true`) {
+		t.Fatalf("session probe = %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/login", strings.NewReader(`{"username":"admin","password":"secret"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, loginRequest)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("login = %d %s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+
+	apiRequest := httptest.NewRequest(http.MethodGet, "/api/v1/processes", nil)
+	apiRequest.Header.Set("Authorization", "Bearer "+payload.Token)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, apiRequest)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expired session status = %d", recorder.Code)
+	}
+}
+
+func TestLoginRejectedWithoutConfiguredCredentials(t *testing.T) {
+	server := NewServer("", "", "", &fakeBackend{}, log.New(io.Discard, "", 0))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/login", strings.NewReader(`{"username":"admin","password":"secret"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("login without credentials = %d %s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func TestStaticAssetsUseContentFingerprintAndCachePolicy(t *testing.T) {
-	server := NewServer("", "", &fakeBackend{}, log.New(io.Discard, "", 0))
+	server := NewServer("", "", "", &fakeBackend{}, log.New(io.Discard, "", 0))
 	handler := server.routes()
 
 	indexRequest := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -151,7 +254,7 @@ func TestConfigUpdateIsValidatedBackedUpAndApplied(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &fakeBackend{configPath: path}
-	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
+	server := NewServer("", "", "", backend, log.New(io.Discard, "", 0))
 	httpServer := httptest.NewServer(server.routes())
 	defer httpServer.Close()
 
@@ -181,36 +284,56 @@ func TestConfigUpdateIsValidatedBackedUpAndApplied(t *testing.T) {
 	}
 }
 
-func TestDeleteProcessRequiresPausedState(t *testing.T) {
+func TestDeleteProcessWithoutPausingFirst(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pm.yaml")
-	content := "web:\n  enabled: false\nprograms:\n  - name: worker\n    command: /bin/true\n"
+	content := "web:\n  enabled: false\nprograms:\n  - name: worker\n    command: /bin/true\n  - name: other\n    command: /bin/true\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	backend := &fakeBackend{
 		configPath: path,
-		statuses:   []supervisor.Status{{Name: "worker", State: supervisor.StateStopped}},
+		statuses:   []supervisor.Status{{Name: "worker", State: supervisor.StateRunning, PID: os.Getpid()}},
 	}
-	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
+	server := NewServer("", "", "", backend, log.New(io.Discard, "", 0))
+	handler := server.routes()
+
 	request := httptest.NewRequest(http.MethodDelete, "/api/v1/processes/worker", nil)
 	response := httptest.NewRecorder()
-
-	server.routes().ServeHTTP(response, request)
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "must be paused") {
-		t.Fatalf("delete = %d %s", response.Code, response.Body.String())
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("delete running process = %d %s", response.Code, response.Body.String())
 	}
+
 	current, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(current) != content {
-		t.Fatalf("configuration changed after rejected delete: %q", current)
+	if strings.Contains(string(current), "name: worker") || !strings.Contains(string(current), "name: other") {
+		t.Fatalf("configuration after delete: %q", current)
+	}
+	backend.mu.Lock()
+	reloaded := false
+	for _, executed := range backend.requests {
+		if executed.Action == "reload" {
+			reloaded = true
+		}
+	}
+	backend.mu.Unlock()
+	if !reloaded {
+		t.Fatalf("expected reload after delete, requests = %+v", backend.requests)
+	}
+
+	request = httptest.NewRequest(http.MethodDelete, "/api/v1/processes/missing", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("delete unknown process = %d %s", response.Code, response.Body.String())
 	}
 }
 
 func TestPauseAndResumeProcessActions(t *testing.T) {
 	backend := &fakeBackend{statuses: []supervisor.Status{{Name: "worker"}}}
-	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
+	server := NewServer("", "", "", backend, log.New(io.Discard, "", 0))
 	handler := server.routes()
 	for _, action := range []string{"pause", "resume"} {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/processes/worker/"+action, nil)
@@ -238,7 +361,7 @@ func TestLogTailEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &fakeBackend{statuses: []supervisor.Status{{Name: "api", State: supervisor.StateRunning, StdoutLog: stdoutPath, StderrLog: stderrPath}}}
-	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
+	server := NewServer("", "", "", backend, log.New(io.Discard, "", 0))
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/logs/api?tail=2", nil)
 	recorder := httptest.NewRecorder()
 	server.routes().ServeHTTP(recorder, request)
@@ -256,7 +379,7 @@ func TestLogTailEndpoint(t *testing.T) {
 
 func TestServerStopsWithContext(t *testing.T) {
 	backend := &fakeBackend{}
-	server := NewServer("127.0.0.1:0", "", backend, log.New(io.Discard, "", 0))
+	server := NewServer("127.0.0.1:0", "", "", backend, log.New(io.Discard, "", 0))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := server.Serve(ctx); err != nil {
@@ -271,7 +394,7 @@ func TestProcessCRUDUpdatesConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &fakeBackend{configPath: path, statuses: []supervisor.Status{{Name: "worker", State: supervisor.StateStopped, Paused: true}}}
-	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
+	server := NewServer("", "", "", backend, log.New(io.Discard, "", 0))
 	handler := server.routes()
 
 	create := httptest.NewRequest(http.MethodPost, "/api/v1/processes", strings.NewReader(`{"name":"worker","group":"jobs","command":"/bin/true"}`))
@@ -316,7 +439,7 @@ func TestProcessCRUDUpdatesConfiguration(t *testing.T) {
 func TestCreateProcessWritesInitiallyMissingConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pm.yaml")
 	backend := &fakeBackend{configPath: path}
-	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
+	server := NewServer("", "", "", backend, log.New(io.Discard, "", 0))
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/processes", strings.NewReader(`{"name":"worker","command":"/bin/true"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -340,7 +463,7 @@ func TestSelectedAndGroupBatchActions(t *testing.T) {
 		{Name: "worker", Group: "jobs", State: supervisor.StateRunning},
 		{Name: "scheduler", Group: "jobs", State: supervisor.StateStopped},
 	}}
-	server := NewServer("", "", backend, log.New(io.Discard, "", 0))
+	server := NewServer("", "", "", backend, log.New(io.Discard, "", 0))
 	handler := server.routes()
 
 	selected := httptest.NewRequest(http.MethodPost, "/api/v1/actions/restart", strings.NewReader(`{"names":["api","worker"]}`))
@@ -371,5 +494,56 @@ func TestSelectedAndGroupBatchActions(t *testing.T) {
 	}
 	if got := backend.requests[2].Names; len(got) != 2 || got[0] != "worker" || got[1] != "scheduler" {
 		t.Fatalf("group names = %v", got)
+	}
+}
+
+func TestResetRestartsSupportsSingleAndBatchActions(t *testing.T) {
+	backend := &fakeBackend{}
+	server := NewServer("", "", "", backend, log.New(io.Discard, "", 0))
+	handler := server.routes()
+
+	single := httptest.NewRequest(http.MethodPost, "/api/v1/processes/api/reset-restarts", nil)
+	singleResponse := httptest.NewRecorder()
+	handler.ServeHTTP(singleResponse, single)
+	if singleResponse.Code != http.StatusOK {
+		t.Fatalf("single reset = %d %s", singleResponse.Code, singleResponse.Body.String())
+	}
+
+	batch := httptest.NewRequest(http.MethodPost, "/api/v1/actions/reset-restarts", strings.NewReader(`{"names":["api","worker"]}`))
+	batch.Header.Set("Content-Type", "application/json")
+	batchResponse := httptest.NewRecorder()
+	handler.ServeHTTP(batchResponse, batch)
+	if batchResponse.Code != http.StatusOK {
+		t.Fatalf("batch reset = %d %s", batchResponse.Code, batchResponse.Body.String())
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.requests) != 2 || backend.requests[0].Action != "reset-restarts" || len(backend.requests[1].Names) != 2 {
+		t.Fatalf("reset requests = %+v", backend.requests)
+	}
+}
+
+func TestEventsCanBeFilteredByProgramAndType(t *testing.T) {
+	backend := &fakeBackend{events: []supervisor.Event{
+		{ID: 3, Program: "worker", Type: "started"},
+		{ID: 2, Program: "api", Type: "restart", Restart: &supervisor.RestartSnapshot{Trigger: "manual"}},
+		{ID: 1, Program: "worker", Type: "restart", Restart: &supervisor.RestartSnapshot{Trigger: "automatic"}},
+	}}
+	server := NewServer("", "", "", backend, log.New(io.Discard, "", 0))
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/events?program=worker&type=restart&limit=10", nil)
+	response := httptest.NewRecorder()
+	server.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("filtered events = %d %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Events []supervisor.Event `json:"events"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Events) != 1 || body.Events[0].ID != 1 {
+		t.Fatalf("filtered events = %+v", body.Events)
 	}
 }

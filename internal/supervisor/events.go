@@ -11,14 +11,31 @@ import (
 )
 
 type Event struct {
-	ID       uint64    `json:"id"`
-	Time     time.Time `json:"time"`
-	Program  string    `json:"program,omitempty"`
-	Type     string    `json:"type"`
-	State    string    `json:"state,omitempty"`
-	PID      int       `json:"pid,omitempty"`
-	ExitCode *int      `json:"exit_code,omitempty"`
-	Message  string    `json:"message,omitempty"`
+	ID       uint64           `json:"id"`
+	Time     time.Time        `json:"time"`
+	Program  string           `json:"program,omitempty"`
+	Type     string           `json:"type"`
+	State    string           `json:"state,omitempty"`
+	PID      int              `json:"pid,omitempty"`
+	ExitCode *int             `json:"exit_code,omitempty"`
+	Message  string           `json:"message,omitempty"`
+	Restart  *RestartSnapshot `json:"restart,omitempty"`
+}
+
+// RestartSnapshot preserves the state and final log output of the old process
+// when PM is about to start its replacement.
+type RestartSnapshot struct {
+	Trigger     string    `json:"trigger"`
+	Reason      string    `json:"reason,omitempty"`
+	PreviousPID int       `json:"previous_pid,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitzero"`
+	Uptime      string    `json:"uptime,omitempty"`
+	ExitCode    *int      `json:"exit_code,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	StdoutLog   string    `json:"stdout_log,omitempty"`
+	StdoutTail  string    `json:"stdout_tail,omitempty"`
+	StderrLog   string    `json:"stderr_log,omitempty"`
+	StderrTail  string    `json:"stderr_tail,omitempty"`
 }
 
 type EventStore struct {

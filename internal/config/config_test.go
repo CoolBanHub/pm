@@ -71,10 +71,38 @@ func TestWebCanBeDisabled(t *testing.T) {
 	}
 }
 
-func TestRejectsPublicWebWithoutToken(t *testing.T) {
+func TestRejectsPublicWebWithoutCredentials(t *testing.T) {
 	_, err := Parse([]byte("web:\n  enabled: true\n  listen: 0.0.0.0:19090\nprograms: []\n"))
 	if err == nil {
-		t.Fatal("expected public listener token error")
+		t.Fatal("expected public listener credential error")
+	}
+}
+
+func TestAcceptsPublicWebWithCredentials(t *testing.T) {
+	cfg, err := Parse([]byte("web:\n  enabled: true\n  listen: 0.0.0.0:19090\n  username: admin\n  password: secret\nprograms: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Web.Username != "admin" || cfg.Web.Password != "secret" {
+		t.Fatalf("credentials = %q/%q", cfg.Web.Username, cfg.Web.Password)
+	}
+}
+
+func TestRejectsPartialWebCredentials(t *testing.T) {
+	_, err := Parse([]byte("web:\n  enabled: true\n  username: admin\nprograms: []\n"))
+	if err == nil {
+		t.Fatal("expected partial credential error")
+	}
+}
+
+func TestRejectsDeprecatedWebToken(t *testing.T) {
+	_, err := Parse([]byte("web:\n  enabled: true\n  token: abc\nprograms: []\n"))
+	if err == nil {
+		t.Fatal("expected deprecated token error")
+	}
+	_, err = Parse([]byte("web:\n  enabled: true\n  token_env: PM_WEB_TOKEN\nprograms: []\n"))
+	if err == nil {
+		t.Fatal("expected deprecated token_env error")
 	}
 }
 

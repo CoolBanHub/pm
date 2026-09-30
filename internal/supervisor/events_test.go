@@ -30,6 +30,30 @@ func TestEventStorePersistsAndLimitsHistory(t *testing.T) {
 	}
 }
 
+func TestEventStorePersistsRestartSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	store, err := NewEventStore(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitCode := 9
+	store.Add(Event{Program: "api", Type: "restart", Restart: &RestartSnapshot{
+		Trigger: "automatic", PreviousPID: 123, ExitCode: &exitCode, StderrTail: "panic details",
+	}})
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewEventStore(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	events := reopened.List(0, 10)
+	if len(events) != 1 || events[0].Restart == nil || events[0].Restart.ExitCode == nil || *events[0].Restart.ExitCode != 9 || events[0].Restart.StderrTail != "panic details" {
+		t.Fatalf("restart snapshot = %+v", events)
+	}
+}
+
 func TestRotatingLog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.log")
 	writer, err := openLog(path, 5, 2)

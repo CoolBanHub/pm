@@ -24,6 +24,8 @@ const (
 	StateExited   = "EXITED"
 	StateBackoff  = "BACKOFF"
 	StateFatal    = "FATAL"
+
+	restartSnapshotBytes = 8 * 1024
 )
 
 type Status struct {
@@ -225,6 +227,15 @@ func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}
 
 	p.state = StateBackoff
 	p.emitLocked("backoff", fmt.Sprintf("restarting in %s", p.config.RestartDelay))
+	snapshot := RestartSnapshot{
+		Trigger:     "automatic",
+		Reason:      automaticRestartReason(code, p.config.Restart),
+		PreviousPID: cmd.Process.Pid,
+		StartedAt:   p.startedAt,
+		Uptime:      formatDuration(now.Sub(p.startedAt)),
+		ExitCode:    intPointer(code),
+		Error:       p.lastError,
+	}
 	delay, _ := p.config.RestartDelayDuration()
 	p.mu.Unlock()
 
@@ -236,7 +247,20 @@ func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}
 	if !p.desired || p.intentID != intentID || p.command != nil {
 		return
 	}
+	p.emitRestartLocked(snapshot)
 	_ = p.startLocked(true)
+}
+
+func automaticRestartReason(code int, policy string) string {
+	if code != 0 {
+		return fmt.Sprintf("process exited with code %d", code)
+	}
+	return fmt.Sprintf("process exited and restart policy is %s", policy)
+}
+
+func intPointer(value int) *int {
+	result := value
+	return &result
 }
 
 func (p *Process) Stop() error {
@@ -329,6 +353,87 @@ func (p *Process) Status() Status {
 	return status
 }
 
+func (p *Process) ResetRestarts() error {
+	p.mu.Lock()
+	previous := p.restarts
+	p.restarts = 0
+	p.restartRuns = nil
+	p.emitLocked("restarts_reset", fmt.Sprintf("restart count reset from %d to 0", previous))
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *Process) emitRestart(snapshot RestartSnapshot) {
+	p.mu.Lock()
+	p.emitRestartLocked(snapshot)
+	p.mu.Unlock()
+}
+
+func (p *Process) emitRestartLocked(snapshot RestartSnapshot) {
+	snapshot.StdoutLog = p.config.StdoutLog
+	snapshot.StderrLog = p.config.StderrLog
+	snapshot.StdoutTail = readLogTail(snapshot.StdoutLog, restartSnapshotBytes)
+	if snapshot.StderrLog != snapshot.StdoutLog {
+		snapshot.StderrTail = readLogTail(snapshot.StderrLog, restartSnapshotBytes)
+	}
+	if p.events == nil {
+		return
+	}
+	p.events.Add(Event{
+		Program:  p.config.Name,
+		Type:     "restart",
+		State:    p.state,
+		PID:      snapshot.PreviousPID,
+		ExitCode: snapshot.ExitCode,
+		Message:  snapshot.Reason,
+		Restart:  &snapshot,
+	})
+}
+
+func restartSnapshotFromStatus(status Status, trigger, reason string) RestartSnapshot {
+	return RestartSnapshot{
+		Trigger:     trigger,
+		Reason:      reason,
+		PreviousPID: status.PID,
+		StartedAt:   status.StartedAt,
+		Uptime:      status.Uptime,
+		ExitCode:    status.ExitCode,
+		Error:       status.LastError,
+	}
+}
+
+func readLogTail(path string, limit int64) string {
+	if path == "" || limit <= 0 {
+		return ""
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return ""
+	}
+	start := info.Size() - limit
+	if start < 0 {
+		start = 0
+	}
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return ""
+	}
+	if start > 0 {
+		if newline := strings.IndexByte(string(data), '\n'); newline >= 0 {
+			data = data[newline+1:]
+		}
+	}
+	return strings.ToValidUTF8(string(data), "\uFFFD")
+}
+
 type Manager struct {
 	processes map[string]*Process
 	events    *EventStore
@@ -384,6 +489,7 @@ func (m *Manager) Apply(programs []config.Program) error {
 		replacement := newProcess(program, m.events)
 		m.processes[name] = replacement
 		if wasActive && !program.Paused && !program.Disabled {
+			process.emitRestart(restartSnapshotFromStatus(status, "configuration", "runtime configuration changed"))
 			if err := replacement.Start(); err != nil {
 				errs = append(errs, err)
 			}
@@ -495,11 +601,17 @@ func (m *Manager) Stop(names []string) error {
 
 func (m *Manager) Restart(names []string) error {
 	return m.each(names, func(p *Process) error {
+		status := p.Status()
 		if err := p.Stop(); err != nil {
 			return err
 		}
+		p.emitRestart(restartSnapshotFromStatus(status, "manual", "restart requested"))
 		return p.Start()
 	})
+}
+
+func (m *Manager) ResetRestarts(names []string) error {
+	return m.each(names, (*Process).ResetRestarts)
 }
 
 // RestartConfigured restarts the selected processes with their current
@@ -531,10 +643,12 @@ func (m *Manager) RestartConfigured(names []string, programs []config.Program) e
 
 	var errs []error
 	for _, item := range targets {
+		status := item.process.Status()
 		if err := item.process.Stop(); err != nil {
 			errs = append(errs, err)
 			continue
 		}
+		item.process.emitRestart(restartSnapshotFromStatus(status, "manual", "restart requested"))
 		item.process.mu.Lock()
 		item.process.config = item.program
 		item.process.mu.Unlock()

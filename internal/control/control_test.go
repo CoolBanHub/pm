@@ -57,6 +57,10 @@ func TestServerLifecycle(t *testing.T) {
 	if !response.OK || len(response.Processes) != 1 || response.Processes[0].State != supervisor.StateRunning || response.Processes[0].PID == firstPID {
 		t.Fatalf("unexpected restarted status: %+v", response)
 	}
+	response = callForTest(t, socket, Request{Action: "reset-restarts", Names: []string{"worker"}})
+	if !response.OK {
+		t.Fatal(response.Message)
+	}
 	response = callForTest(t, socket, Request{Action: "pause", Names: []string{"worker"}})
 	if !response.OK {
 		t.Fatal(response.Message)

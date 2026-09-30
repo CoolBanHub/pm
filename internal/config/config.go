@@ -58,8 +58,16 @@ type Config struct {
 }
 
 type Web struct {
-	Enabled  bool   `json:"enabled" yaml:"enabled"`
-	Listen   string `json:"listen" yaml:"listen"`
+	Enabled bool   `json:"enabled" yaml:"enabled"`
+	Listen  string `json:"listen" yaml:"listen"`
+	// Username and Password enable browser login for the web console. Both
+	// must be set together; when unset the console is only reachable without
+	// authentication on loopback listeners.
+	Username string `json:"username,omitempty" yaml:"username,omitempty"`
+	Password string `json:"password,omitempty" yaml:"password,omitempty"`
+	// Token and TokenEnv are deprecated and no longer authenticate anything.
+	// The fields remain so older configuration files still parse; setting
+	// either fails validation with a migration hint.
 	Token    string `json:"token,omitempty" yaml:"token,omitempty"`
 	TokenEnv string `json:"token_env,omitempty" yaml:"token_env,omitempty"`
 }
@@ -120,7 +128,7 @@ func SeedDefaultConfig(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, defaultConfigTemplate, 0o644)
+	return os.WriteFile(path, defaultConfigTemplate, 0o600)
 }
 
 // DefaultConfig returns built-in defaults. Socket and StateDir are relative so
@@ -228,8 +236,14 @@ func (c Config) Validate() error {
 		if err != nil {
 			return fmt.Errorf("web.listen: %w", err)
 		}
-		if !isLoopback(host) && c.Web.Token == "" && c.Web.TokenEnv == "" {
-			return errors.New("web token or token_env is required when listening beyond localhost")
+		if c.Web.Token != "" || c.Web.TokenEnv != "" {
+			return errors.New("web.token/token_env are no longer supported; configure web.username/web.password instead and remove the deprecated fields")
+		}
+		if (c.Web.Username == "") != (c.Web.Password == "") {
+			return errors.New("web.username and web.password must be configured together")
+		}
+		if !isLoopback(host) && c.Web.Username == "" {
+			return errors.New("web username and password are required when listening beyond localhost")
 		}
 	}
 	names := make(map[string]struct{}, len(c.Programs))
@@ -334,20 +348,6 @@ func ResolvePaths(cfg *Config, configPath string) {
 		p.StdoutLog = resolve(base, p.StdoutLog)
 		p.StderrLog = resolve(base, p.StderrLog)
 	}
-}
-
-func (w Web) ResolvedToken() (string, error) {
-	if w.Token != "" {
-		return w.Token, nil
-	}
-	if w.TokenEnv == "" {
-		return "", nil
-	}
-	token := os.Getenv(w.TokenEnv)
-	if token == "" {
-		return "", fmt.Errorf("environment variable %s is empty", w.TokenEnv)
-	}
-	return token, nil
 }
 
 func isLoopback(host string) bool {

@@ -138,6 +138,10 @@ func (s *Server) dispatch(request Request) (Response, bool) {
 		return resultMessage("stopped "+targets(request.Names), s.manager.Stop(request.Names)), false
 	case "restart":
 		return s.restart(request.Names), false
+	case "reset-restarts":
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return resultMessage("reset restart count for "+targets(request.Names), s.manager.ResetRestarts(request.Names)), false
 	case "pause":
 		s.mu.RLock()
 		defer s.mu.RUnlock()

@@ -21,7 +21,7 @@ pm status               # detailed table (CPU, memory, uptime, restarts, exit)
 
 On the first run, PM creates `~/.pm/` and writes a default, editable config to
 `~/.pm/pm.yaml`. With the default config the web console is enabled at
-http://127.0.0.1:19090 (token optional while listening on loopback).
+http://127.0.0.1:19090 (login optional while listening on loopback).
 
 All default data lives under `~/.pm`:
 
@@ -48,6 +48,7 @@ pm update                                      # download and install latest Git
 pm [-socket PATH] status [NAME...]        # full details for all or named programs
 pm [-socket PATH] list   [NAME...]        # compact overview including PID, TCP ports and uptime
 pm [-socket PATH] start|stop|restart NAME|all
+pm [-socket PATH] reset-restarts NAME|all
 pm [-socket PATH] pause|resume|disable|enable NAME|all
 pm [-socket PATH] reload                  # hot-reload program config from disk
 pm [-socket PATH] shutdown                # stop the daemon (and all managed programs)
@@ -110,8 +111,8 @@ load and on web edits; the daemon refuses to start on invalid config.
 | `event_history` | events kept in memory; `0` disables | `1000` |
 | `web.enabled` | enable the HTTP console | `true` |
 | `web.listen` | HTTP listen address | `127.0.0.1:19090` |
-| `web.token` | access token, literal | empty |
-| `web.token_env` | env var name holding the token (preferred) | empty |
+| `web.username` | web login username (must pair with `password`) | empty |
+| `web.password` | web login password | empty |
 
 ### Program fields
 
@@ -187,22 +188,26 @@ programs:
 ## Web security
 
 Set `web.enabled: false` to disable HTTP entirely; the Unix-socket CLI is
-unaffected. The default listener is loopback only, where a token is optional.
-Listening beyond loopback (`0.0.0.0`, etc.) REQUIRES `token` or `token_env` or
-the daemon refuses to start. Prefer injecting the token via an env var:
+unaffected. The default listener is loopback only, where login is optional.
+Listening beyond loopback (`0.0.0.0`, etc.) REQUIRES `username` + `password`
+(both, together) or the daemon refuses to start:
 
 ```yaml
 web:
   enabled: true
   listen: 0.0.0.0:19090
-  token_env: PM_WEB_TOKEN
-```
-```bash
-export PM_WEB_TOKEN="$(openssl rand -hex 24)"
+  username: admin
+  password: "a-strong-password"
 ```
 
-Tokens travel in cleartext over HTTP on a LAN — put HTTPS (reverse proxy) or an
-SSH tunnel in front for cross-machine access: `ssh -L 19090:127.0.0.1:19090 user@host`.
+Browsers log in with those credentials; the server then issues an expiring
+session token (24h sliding). The legacy `token` / `token_env` fields are
+deprecated, authenticate nothing, and fail validation with a migration error
+if set — remove them and use username/password instead.
+
+Credentials travel in cleartext over HTTP on a LAN — put HTTPS (reverse proxy)
+or an SSH tunnel in front for cross-machine access:
+`ssh -L 19090:127.0.0.1:19090 user@host`.
 
 ## reload vs restart
 
@@ -228,6 +233,11 @@ replaces the config via a temp file in the same directory.
   the stronger administrative marker.
 - Diagnose a `FATAL` program: `pm status NAME` shows restart count and last
   error; review `~/.pm/logs/<name>.log` and `~/.pm/logs/pm-daemon.log`.
+- Clear restart counters and the active rate-limit window without changing
+  process state: `pm reset-restarts NAME` (multiple names and `all` work).
+- Restart events persist the trigger, previous PID, exit/error details, and
+  the final stdout/stderr log tails in `events.jsonl`; inspect them in the Web
+  process drawer under Restart history.
 - Move data: edit `~/.pm/pm.yaml` paths, or run with `-config` pointing
   elsewhere; remember `socket`/`state_dir`/`web`/`event_history` changes need a
   daemon restart, not just `reload`.

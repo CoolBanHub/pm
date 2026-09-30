@@ -3,6 +3,7 @@ package supervisor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,102 @@ func TestUnexpectedExitRestartsAndBecomesFatal(t *testing.T) {
 	status := p.Status()
 	if status.Restarts != 2 || status.Starts != 3 {
 		t.Fatalf("unexpected restart counts: %+v", status)
+	}
+}
+
+func TestAutomaticRestartRecordsExitAndLogSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	program := testProgram("failing", "printf stdout-before-restart; printf stderr-before-restart >&2; exit 7")
+	program.Restart = "unexpected"
+	program.MaxRestarts = 1
+	program.StdoutLog = filepath.Join(dir, "stdout.log")
+	program.StderrLog = filepath.Join(dir, "stderr.log")
+	events, err := NewEventStore(filepath.Join(dir, "events.jsonl"), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+	p := newProcess(program, events)
+	if err := p.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool { return p.Status().State == StateFatal })
+
+	var restart *Event
+	for _, event := range events.List(0, 100) {
+		if event.Type == "restart" {
+			restart = &event
+			break
+		}
+	}
+	if restart == nil || restart.Restart == nil {
+		t.Fatalf("restart event missing: %+v", events.List(0, 100))
+	}
+	snapshot := restart.Restart
+	if snapshot.Trigger != "automatic" || snapshot.PreviousPID == 0 || snapshot.ExitCode == nil || *snapshot.ExitCode != 7 {
+		t.Fatalf("restart snapshot = %+v", snapshot)
+	}
+	if !strings.Contains(snapshot.StdoutTail, "stdout-before-restart") || !strings.Contains(snapshot.StderrTail, "stderr-before-restart") {
+		t.Fatalf("restart log snapshot = stdout %q, stderr %q", snapshot.StdoutTail, snapshot.StderrTail)
+	}
+}
+
+func TestManualRestartRecordsSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	program := testProgram("worker", "printf ready; printf warning-before-restart >&2; sleep 30")
+	program.StdoutLog = filepath.Join(dir, "stdout.log")
+	program.StderrLog = filepath.Join(dir, "stderr.log")
+	events, err := NewEventStore("", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewWithEvents([]config.Program{program}, events)
+	defer manager.StopAll()
+	if err := manager.Start([]string{"worker"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool {
+		data, err := os.ReadFile(program.StderrLog)
+		return err == nil && strings.Contains(string(data), "warning-before-restart")
+	})
+	before, _ := manager.Status([]string{"worker"})
+	if err := manager.Restart([]string{"worker"}); err != nil {
+		t.Fatal(err)
+	}
+
+	eventsList := events.List(0, 100)
+	var restart *Event
+	for _, event := range eventsList {
+		if event.Type == "restart" {
+			restart = &event
+			break
+		}
+	}
+	if restart == nil || restart.Restart == nil {
+		t.Fatalf("restart event missing: %+v", eventsList)
+	}
+	if restart.Restart.Trigger != "manual" || restart.Restart.PreviousPID != before[0].PID || !strings.Contains(restart.Restart.StderrTail, "warning-before-restart") {
+		t.Fatalf("manual restart snapshot = %+v", restart.Restart)
+	}
+}
+
+func TestManagerResetRestartsSupportsMultipleProcesses(t *testing.T) {
+	manager := New([]config.Program{testProgram("first", "sleep 30"), testProgram("second", "sleep 30")})
+	for _, process := range manager.processes {
+		process.restarts = 4
+		process.restartRuns = []time.Time{time.Now()}
+	}
+	if err := manager.ResetRestarts([]string{"first", "second"}); err != nil {
+		t.Fatal(err)
+	}
+	statuses, err := manager.Status(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range statuses {
+		if status.Restarts != 0 || len(manager.processes[status.Name].restartRuns) != 0 {
+			t.Fatalf("restart state was not reset for %s: %+v", status.Name, status)
+		}
 	}
 }
 

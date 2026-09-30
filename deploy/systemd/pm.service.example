@@ -9,7 +9,6 @@ Group=pm
 WorkingDirectory=/var/lib/pm
 ExecStart=/usr/local/bin/pm daemon -config /etc/pm/pm.yaml
 ExecReload=/usr/local/bin/pm -socket /run/pm/pm.sock reload
-EnvironmentFile=/etc/pm/pm.env
 
 RuntimeDirectory=pm
 RuntimeDirectoryMode=0750

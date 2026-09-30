@@ -56,8 +56,7 @@ scp pm user@server:/tmp/pm
 | 用途 | 路径 | 说明 |
 | --- | --- | --- |
 | 二进制 | `/usr/local/bin/pm` | 全局可执行 |
-| 配置 | `/etc/pm/pm.yaml` | 主配置（用绝对路径） |
-| 密钥 | `/etc/pm/pm.env` | 令牌等敏感环境变量，`chmod 600` |
+| 配置 | `/etc/pm/pm.yaml` | 主配置（含 Web 登录账号密码，`chmod 640`） |
 | 运行时 Socket | `/run/pm/pm.sock` | 由 `RuntimeDirectory` 管理，停止即清理 |
 | 状态数据 | `/var/lib/pm/` | `events.jsonl` 等，由 `StateDirectory` 管理 |
 | 进程日志 | `/var/log/pm/` | 受管程序的 stdout/stderr |
@@ -90,8 +89,9 @@ web:
   enabled: true
   # 仅监听本机回环；跨机器访问走反向代理（见「安全加固」）
   listen: 127.0.0.1:19090
-  # 令牌从环境变量读取，避免明文写进配置
-  token_env: PM_WEB_TOKEN
+  # Web 后台登录账号密码（两者必须同时配置）
+  username: admin
+  password: "更换为强密码"
 
 programs:
   - name: my-app
@@ -107,21 +107,16 @@ programs:
     log_backups: 5
 ```
 
-> 仅监听 `127.0.0.1` 时令牌可选。一旦 `listen` 超出回环（如 `0.0.0.0`），PM 会**强制要求** `token` 或 `token_env`，否则拒绝启动。
+> 仅监听 `127.0.0.1` 时登录可选。一旦 `listen` 超出回环（如 `0.0.0.0`），PM 会**强制要求**配置 `username` + `password`，否则拒绝启动。浏览器访问时用该账号密码登录，登录后服务端签发 24 小时滑动过期的会话。
 
-令牌放环境变量文件 `/etc/pm/pm.env`（不进配置、不进版本库）：
+密码直接写在配置文件里（与旧版令牌的明文存储方式一致），收紧配置文件权限：
 
 ```bash
-sudo tee /etc/pm/pm.env >/dev/null <<'EOF'
-PM_WEB_TOKEN=$(openssl rand -hex 24 的实际结果)
-EOF
-sudo chown root:pm /etc/pm/pm.env
-sudo chmod 640 /etc/pm/pm.env
+sudo chown root:pm /etc/pm/pm.yaml
+sudo chmod 640 /etc/pm/pm.yaml
 ```
 
-> 生成令牌：`openssl rand -hex 24`。把真实值写入文件，不要保留字面的 `$(...)` 占位。
-
-配置文件本身不含密钥，可以放宽权限便于审查：`sudo chmod 644 /etc/pm/pm.yaml`。
+> 生成强密码：`openssl rand -base64 18`。旧版的 `token` / `token_env` 已废弃，配置了会启动报错，请删除改用账号密码。
 
 ## 4. systemd 单元文件
 
@@ -145,9 +140,6 @@ ExecStart=/usr/local/bin/pm daemon -config /etc/pm/pm.yaml
 
 # 受管程序配置支持差量重载
 ExecReload=/usr/local/bin/pm -socket /run/pm/pm.sock reload
-
-# 令牌等环境变量
-EnvironmentFile=/etc/pm/pm.env
 
 # 运行时目录：自动创建 /run/pm（权限归属 pm:pm），停止时清理
 RuntimeDirectory=pm
@@ -306,7 +298,7 @@ sudo systemctl start pm
 | 现象 | 排查 |
 | --- | --- |
 | `systemctl status` 显示 failed | `journalctl -u pm -n 100` 看具体错误；常见为配置校验失败或 socket 目录权限问题 |
-| 启动报 token 相关错误 | `listen` 超出回环但未配 `token`/`token_env`，或 `PM_WEB_TOKEN` 未注入（检查 `/etc/pm/pm.env` 和 `EnvironmentFile=`） |
+| 启动报登录/token 相关错误 | `listen` 超出回环但未配 `username`+`password`；或还留着旧版 `token`/`token_env` 字段（已废弃，删掉改用账号密码） |
 | CLI 报 socket 不存在 | 未指向 `/run/pm/pm.sock`，或服务未运行；确认 `pm status` 用了正确 socket |
 | `/run/pm` 重启后消失 | 正常，`RuntimeDirectory` 在停止时清理，启动时重建 |
 | 受管程序没日志输出 | 检查该程序的 `stdout_log` 路径，及 `pm:pm` 对 `/var/log/pm` 的写权限 |
@@ -323,7 +315,7 @@ PM 的 Web 后台只跑 HTTP。要在公网用域名访问（`https://pm.kbtoken
 
 这样源站只需 80 端口、无需证书。模板见 [deploy/nginx/pm.kbtoken.top.conf](nginx/pm.kbtoken.top.conf)。
 
-> 暴露公网前请务必配置强 `PM_WEB_TOKEN`（`openssl rand -hex 24`），PM 的全部 API 都要校验它。进程管理器能执行任意外部程序，建议同时评估叠加 IP 白名单或「仅允许 CF 回源」（模板里给出可选注释行）。
+> 暴露公网前请务必配置强账号密码（`username` + `password`），PM 的全部 API 都要校验登录会话。进程管理器能执行任意外部程序，建议同时评估叠加 IP 白名单或「仅允许 CF 回源」（模板里给出可选注释行）。
 
 ### 前置条件
 

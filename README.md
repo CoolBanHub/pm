@@ -126,6 +126,7 @@ CLI 不依赖 HTTP，所有操作都通过 Unix Socket 完成。CLI 会依次使
 ./bin/pm start example-worker
 ./bin/pm stop example-worker
 ./bin/pm restart example-worker
+./bin/pm reset-restarts example-worker
 ./bin/pm pause example-worker
 ./bin/pm resume example-worker
 ./bin/pm disable example-worker
@@ -137,6 +138,8 @@ CLI 不依赖 HTTP，所有操作都通过 Unix Socket 完成。CLI 会依次使
 ```
 
 `restart` 会先重新读取并校验 `pm.yaml`，再用其中的最新进程配置重启目标，因此对 `environment`、命令参数和日志路径的修改会在本次启动生效。配置文件无效时不会停止当前进程；增删进程仍使用 `pm reload`。
+
+`reset-restarts` 清零目标进程的累计重启次数和当前重启限流时间窗，支持多个进程名或 `all`。清零操作不会启动、停止或重启进程，并会写入事件记录。每次自动重启、手动重启或运行参数变更触发的重启都会在事件历史中保存快照，包括时间、触发原因、旧 PID、退出码、错误信息，以及重启前标准输出和标准错误各自最多 8 KiB 的末尾内容；可在 Web 进程详情的“重启记录”中展开查看。快照沿用 `event_history` 的保留数量并持久化在 `state_dir/events.jsonl`。
 
 `pm up` 是 `pm daemon` 的短别名，参数会原样传递，因此 `pm up -d` 等价于 `pm daemon -d`。
 
@@ -168,20 +171,19 @@ web:
 
 关闭后 PM 不会创建 HTTP 监听端口，进程查询、启动、停止、重启、日志、配置 reload 和守护进程关闭仍可通过 CLI 完成。
 
-默认只监听 `127.0.0.1`，此时访问令牌可选。只要监听地址超出本机回环地址，配置就必须提供 `token` 或 `token_env`，否则守护进程拒绝启动。推荐通过环境变量注入令牌：
+默认只监听 `127.0.0.1`，此时账号密码可选（免登录）。只要监听地址超出本机回环地址，配置就必须提供 `username` 和 `password`（两者必须同时配置），否则守护进程拒绝启动：
 
 ```yaml
 web:
   enabled: true
   listen: 0.0.0.0:19090
-  token_env: PM_WEB_TOKEN
+  username: admin
+  password: "更换为强密码"
 ```
 
-```bash
-export PM_WEB_TOKEN="$(openssl rand -hex 24)"
-```
+浏览器访问时使用该账号密码登录；登录后服务端签发有过期时间的会话 token，24 小时无操作自动失效。旧版的 `token` / `token_env` 已废弃，不再作为认证方式，配置了会导致启动报错，请删除并改用账号密码。
 
-局域网访问会以明文 HTTP 传输令牌。需要跨机器访问时，应在 PM 前放置提供 HTTPS 的反向代理，或使用 SSH 端口转发：
+局域网访问会以明文 HTTP 传输账号密码。需要跨机器访问时，应在 PM 前放置提供 HTTPS 的反向代理，或使用 SSH 端口转发：
 
 ```bash
 ssh -L 19090:127.0.0.1:19090 user@host
@@ -200,8 +202,8 @@ ssh -L 19090:127.0.0.1:19090 user@host
 | `event_history` | 内存中保留的事件数量；`0` 为关闭 | `1000` |
 | `web.enabled` | 启用管理后台 | `true` |
 | `web.listen` | HTTP 监听地址 | `127.0.0.1:19090` |
-| `web.token` | 直接配置的访问令牌 | 空 |
-| `web.token_env` | 读取访问令牌的环境变量名 | 空 |
+| `web.username` | Web 后台登录用户名（须与 `password` 同时配置） | 空 |
+| `web.password` | Web 后台登录密码 | 空 |
 
 ### 进程字段
 

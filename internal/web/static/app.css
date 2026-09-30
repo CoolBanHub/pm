@@ -361,7 +361,7 @@ tbody tr { transition: background-color .12s; }
 tbody tr:hover { background: var(--surface-hover); }
 .check-column { width: 42px; text-align: center; }
 /* 名称列吸收隐藏列留下的空间，避免固定宽度的复选框列被撑宽；窄屏交给横向滚动 */
-th:nth-child(2) { width: var(--name-column-width, 14%); } th:nth-child(3) { width: 7%; } th:nth-child(4) { width: 4%; }
+th:nth-child(2) { width: var(--name-column-width, 14%); } th:nth-child(3) { width: 12%; } th:nth-child(4) { width: 4%; }
 th:nth-child(5), th:nth-child(7), th:nth-child(10), th:nth-child(12), th:nth-child(13) { width: 5%; }
 th:nth-child(6) { width: 7%; } th:nth-child(8) { width: 7%; } th:nth-child(9) { width: 8%; } th:nth-child(11) { width: 6%; } th:last-child { width: 17%; }
 td.check-column { padding-left: 0; padding-right: 0; text-align: center; text-overflow: clip; }
@@ -430,6 +430,30 @@ body.hide-col-restarts .col-restarts, body.hide-col-restarts .cell-restarts { di
 .event-time { font-family: var(--font-mono); font-size: 11px; }
 .event-item strong { font-weight: 620; font-size: 12px; }
 .event-type { font-weight: 650; text-transform: uppercase; font-size: 10px; letter-spacing: .04em; color: var(--accent); }
+.restart-list { display: grid; gap: 10px; }
+.restart-record { border-bottom: 1px solid var(--surface-2); font-size: 12px; }
+.restart-list .restart-record { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.restart-record > summary { position: relative; display: grid; grid-template-columns: 150px minmax(100px, 170px) 92px 1fr; gap: 14px; align-items: center; min-height: 42px; padding: 8px 42px 8px 20px; cursor: pointer; list-style: none; }
+.restart-list .restart-record > summary { grid-template-columns: minmax(130px, 1fr) minmax(100px, 140px) 92px; }
+.restart-list .restart-record > summary .event-message { grid-column: 1 / -1; }
+.restart-record > summary::-webkit-details-marker { display: none; }
+.restart-record > summary:hover { background: var(--surface-hover); }
+.restart-record > summary::after { content: "+"; position: absolute; right: 20px; color: var(--faint); font-size: 16px; line-height: 1; }
+.restart-record[open] > summary::after { content: "-"; }
+.restart-trigger { width: fit-content; padding: 3px 7px; border-radius: var(--radius-sm); color: var(--accent); background: var(--accent-soft); font-weight: 650; font-size: 10px; }
+.restart-snapshot { display: grid; gap: 10px; padding: 12px 20px 16px; border-top: 1px solid var(--surface-2); background: var(--surface-2); }
+.restart-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--border); }
+.restart-meta > div, .restart-error { min-width: 0; padding: 9px 10px; background: var(--surface); }
+.restart-meta span, .restart-error span { display: block; margin-bottom: 4px; color: var(--faint); font-size: 10px; }
+.restart-meta code, .restart-error code { color: var(--ink); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.restart-error { border: 1px solid var(--red); border-radius: var(--radius-sm); }
+.restart-error code { color: var(--red); }
+.restart-log { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.restart-log > summary { display: flex; align-items: center; gap: 10px; padding: 9px 10px; cursor: pointer; }
+.restart-log > summary span { flex: 0 0 auto; font-weight: 650; }
+.restart-log > summary code { min-width: 0; overflow: hidden; color: var(--faint); font: 10px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.restart-log pre { max-height: 280px; margin: 0; padding: 12px; overflow: auto; border-top: 1px solid var(--border); background: var(--log-bg); color: var(--log-ink); font: 11px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.restart-no-logs { padding: 10px; color: var(--muted); text-align: center; }
 
 /* ============================================================
    Drawer
@@ -634,6 +658,11 @@ body.hide-col-restarts .col-restarts, body.hide-col-restarts .cell-restarts { di
 
   .event-item { grid-template-columns: 1fr 90px; gap: 5px 10px; padding: 10px 16px; }
   .event-message { grid-column: 1 / -1; }
+  .restart-record > summary { grid-template-columns: 1fr 90px; gap: 5px 10px; padding: 10px 38px 10px 16px; }
+  .restart-list .restart-record > summary { grid-template-columns: 1fr 90px; }
+  .restart-record > summary .event-message { grid-column: 1 / -1; }
+  .restart-record > summary::after { right: 14px; }
+  .restart-meta { grid-template-columns: 1fr 1fr; }
 
   .drawer-tabs { padding: 0 8px; }
   .drawer-tabs button { flex: 1; padding: 0 6px; }
