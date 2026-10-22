@@ -19,6 +19,12 @@ web:
   password: ""
   # 旧版的 token / token_env 已废弃，不再作为认证方式；配置了会启动报错，请删除。
 
+# 配置拆分（可选，类似 supervisor 的 [include]）：把进程分散到独立文件，适合
+# 多应用/多部署包共用一个 PM 实例。支持 glob，相对主配置目录解析，按文件名
+# 合并；include 文件只能包含 programs 和嵌套 include，守护进程级字段只认主文件。
+# include:
+#   - conf.d/*.yaml
+
 # 受管进程列表。每个条目省略的字段会使用默认值，见 README 字段表。
 programs:
   - name: example-worker
@@ -26,17 +32,27 @@ programs:
     group: workers
     command: /bin/sh
     # command 不经过 shell；需要管道/重定向/循环时显式调用 sh -c。
+    # command/args/directory/日志路径支持 ${VAR} 形式的环境变量展开
+    # （取守护进程自身的环境变量，未定义展开为空）。
     args: ["-c", 'while true; do echo "tick $(date)"; sleep 5; done']
     directory: "."
     environment:
       APP_ENV: local
     autostart: true
+    # 启动/停止顺序：数字小的先启动、后停止；相同数字按名称排序。
+    priority: 999
     # 重启策略：never | unexpected | always
     restart: unexpected
     restart_delay: 1s
     max_restarts: 5
     restart_window: 1m
-    # 停止信号：TERM | INT | QUIT | HUP
+    # “预期退出码”：restart 为 unexpected 时，命中这些退出码视为正常退出、不重启。
+    # 留空表示只有 0 是预期退出码。
+    # exit_codes: [0, 3]
+    # 启动稳定时间：进程存活该时长后才从 STARTING 变为 RUNNING；在此之前退出
+    # 一律视为启动失败并按重启策略重试（即使退出码为 0）。0s 关闭该机制。
+    start_secs: 0s
+    # 停止信号：TERM | INT | QUIT | HUP | USR1 | USR2
     stop_signal: TERM
     stop_timeout: 10s
     stdout_log: logs/example-worker.log

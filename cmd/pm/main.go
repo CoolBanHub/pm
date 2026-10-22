@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -73,6 +74,10 @@ func run(args []string) error {
 		return systemdCommand(args)
 	case "update":
 		return updateCommand(args)
+	case "import-supervisor":
+		return importSupervisorCommand(args)
+	case "check":
+		return checkCommand(args)
 	case "status", "start", "stop", "restart", "reset-restarts", "pause", "resume", "disable", "enable":
 		resolvedSocket, err := resolveControlSocket(*socket)
 		if err != nil {
@@ -177,6 +182,55 @@ func flagWasSet(flags *flag.FlagSet, name string) bool {
 		}
 	})
 	return found
+}
+
+// checkCommand validates a configuration file (including its include drop-ins)
+// without starting anything. It mirrors the daemon's load path: a missing file
+// at the implicit default location means built-in defaults, which are valid.
+func checkCommand(args []string) error {
+	flags := flag.NewFlagSet("check", flag.ContinueOnError)
+	configPath := flags.String("config", defaultConfigPath(), "configuration file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("check does not accept positional arguments")
+	}
+	absolute, err := filepath.Abs(*configPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.LoadOrDefault(absolute)
+	if err != nil {
+		return fmt.Errorf("configuration invalid: %w", err)
+	}
+	config.ResolvePaths(&cfg, absolute)
+	if len(cfg.Programs) == 0 {
+		fmt.Printf("configuration OK: %s (no programs)\n", absolute)
+		return nil
+	}
+	programs := append([]config.Program(nil), cfg.Programs...)
+	sort.Slice(programs, func(i, j int) bool {
+		if programs[i].Priority != programs[j].Priority {
+			return programs[i].Priority < programs[j].Priority
+		}
+		return programs[i].Name < programs[j].Name
+	})
+	rows := [][]string{{"NAME", "GROUP", "PRIORITY", "AUTOSTART", "RESTART", "SOURCE"}}
+	for _, program := range programs {
+		autostart := "no"
+		if program.Autostart {
+			autostart = "yes"
+		}
+		source := "main"
+		if program.Source != "" && program.Source != absolute {
+			source = program.Source
+		}
+		rows = append(rows, []string{program.Name, program.Group, strconv.Itoa(program.Priority), autostart, program.Restart, source})
+	}
+	fmt.Printf("configuration OK: %s (%d programs, listed by startup priority)\n", absolute, len(programs))
+	fmt.Print(renderTable(rows))
+	return nil
 }
 
 func resolveControlSocket(explicit string) (string, error) {
@@ -378,7 +432,7 @@ func listCommand(socket string, names []string) error {
 
 func printStatuses(statuses []supervisor.Status) {
 	rows := [][]string{
-		{"NAME", "GROUP", "STATE", "MODE", "PID", "TCP PORTS", "CPU", "MEMORY", "DISK", "CHILDREN", "DESCENDANTS", "GOROUTINES", "UPTIME", "STARTS", "EXIT", "DETAIL"},
+		{"NAME", "GROUP", "STATE", "MODE", "PID", "TCP PORTS", "CPU", "MEMORY", "DISK", "CHILDREN", "DESCENDANTS", "GOROUTINES", "UPTIME", "STARTS", "PRIORITY", "EXIT", "DETAIL"},
 	}
 	for _, status := range statuses {
 		pid, tcpPorts, cpu, memory, disk, children, descendants, goroutines, exit := "-", "-", "-", "-", "-", "-", "-", "-", "-"
@@ -415,7 +469,7 @@ func printStatuses(statuses []supervisor.Status) {
 			detail += fmt.Sprintf("restarts=%d", status.Restarts)
 		}
 		rows = append(rows, []string{
-			status.Name, status.Group, status.State, mode, pid, tcpPorts, cpu, memory, disk, children, descendants, goroutines, valueOrDash(status.Uptime), strconv.Itoa(status.Starts), exit, detail,
+			status.Name, status.Group, status.State, mode, pid, tcpPorts, cpu, memory, disk, children, descendants, goroutines, valueOrDash(status.Uptime), strconv.Itoa(status.Starts), strconv.Itoa(status.Priority), exit, detail,
 		})
 	}
 	fmt.Print(renderTable(rows))
@@ -606,14 +660,17 @@ func usage(writer io.Writer) {
   pm [-socket PATH] up [-config FILE] [-d] [-log FILE]
   pm systemd [-config FILE]
   pm update
+  pm check [-config FILE]
+  pm import-supervisor SRC [-out DIR] [-force]
   pm [-socket PATH] status [NAME...]
   pm [-socket PATH] list [NAME...]
-  pm [-socket PATH] start|stop|restart NAME|all
-  pm [-socket PATH] reset-restarts NAME|all
-  pm [-socket PATH] pause|resume|disable|enable NAME|all
+  pm [-socket PATH] start|stop|restart NAME|GROUP|all
+  pm [-socket PATH] reset-restarts NAME|GROUP|all
+  pm [-socket PATH] pause|resume|disable|enable NAME|GROUP|all
   pm [-socket PATH] reload|shutdown|down
   pm [-socket PATH] logs [-n LINES] [-f] [-stderr] NAME
   pm llms.txt
   pm version | pm -v
-  pm help | pm -h | pm --help`)
+  pm help | pm -h | pm --help
+Groups are addressed as group:NAME or NAME:*.`)
 }

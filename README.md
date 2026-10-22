@@ -26,19 +26,25 @@ curl -fsSL https://raw.githubusercontent.com/CoolBanHub/pm/main/install.sh | sh 
 
 ## 能力
 
-- 进程启动、停止、重启、批量操作和状态查询
-- Web 表单新增、编辑和删除进程，无需手写 YAML
+- 进程启动、停止、重启、批量操作和状态查询；进程名和分组（`group:web`、`web:*`）都可作为操作目标
+- 配置拆分：主配置通过 `include` 引入 `conf.d/*.yaml` 之类的独立进程文件，支持嵌套、重复检测与来源归属
+- 一键迁移 supervisor：`pm import-supervisor /etc/supervisor` 自动转换 program/group 配置
+- `pm check` 离线校验配置（含 include 展开），不启动任何进程
+- Web 表单新增、编辑和删除进程，无需手写 YAML；include 文件中的进程受保护，不会被误改
 - 进程分组、分组筛选、列表全选和选中项批量操作
-- `never`、`unexpected`、`always` 自动重启策略
+- `priority` 启动/停止顺序：数字小的先启动、后停止（对齐 supervisor 的 priority）
+- `never`、`unexpected`、`always` 自动重启策略；`exit_codes` 自定义预期退出码
+- `start_secs` 启动稳定窗口：STARTING 状态，早期退出视为启动失败并重试
 - 时间窗重启限流，持续失败后进入 `FATAL`
 - 独立进程组管理，优雅停止超时后强制结束整个进程树
 - CPU、内存、PID、TCP 监听端口、运行时间、进程树和重启次数监控；Go 程序可选采集 goroutine 数
 - stdout/stderr 实时日志与在线日志切割
 - 持久化生命周期事件历史，事件文件自动压缩
 - 响应式 Web 管理后台和实时日志流
-- Web 访问令牌、写操作同源校验和仅本机监听的安全默认值
+- Web 登录会话、写操作同源校验和仅本机监听的安全默认值
 - 严格配置校验、Web 配置编辑、原子替换和自动备份
 - 配置 reload；不可热变更的运行参数会明确要求重启守护进程
+- 配置值支持 `${VAR}` 环境变量展开（command/args/directory/environment/日志路径）
 - 前台运行、后台运行，以及 launchd/systemd 托管模板
 
 ## 构建
@@ -126,6 +132,8 @@ CLI 不依赖 HTTP，所有操作都通过 Unix Socket 完成。CLI 会依次使
 ./bin/pm start example-worker
 ./bin/pm stop example-worker
 ./bin/pm restart example-worker
+./bin/pm start group:workers      # 以分组为目标（等价写法 workers:*）
+./bin/pm stop group:workers
 ./bin/pm reset-restarts example-worker
 ./bin/pm pause example-worker
 ./bin/pm resume example-worker
@@ -137,13 +145,15 @@ CLI 不依赖 HTTP，所有操作都通过 Unix Socket 完成。CLI 会依次使
 ./bin/pm down      # 等价于 pm shutdown
 ```
 
+上述进程操作都接受多个进程名、`group:分组名`（或 `分组名:*`）或 `all`；`status` 和 `list` 同样支持按组筛选。分组操作按 `priority` 排序执行：启动时数字小的先启动，停止时数字大的先停止。
+
 `restart` 会先重新读取并校验 `pm.yaml`，再用其中的最新进程配置重启目标，因此对 `environment`、命令参数和日志路径的修改会在本次启动生效。配置文件无效时不会停止当前进程；增删进程仍使用 `pm reload`。
 
 `reset-restarts` 清零目标进程的累计重启次数和当前重启限流时间窗，支持多个进程名或 `all`。清零操作不会启动、停止或重启进程，并会写入事件记录。每次自动重启、手动重启或运行参数变更触发的重启都会在事件历史中保存快照，包括时间、触发原因、旧 PID、退出码、错误信息，以及重启前标准输出和标准错误各自最多 8 KiB 的末尾内容；可在 Web 进程详情的“重启记录”中展开查看。快照沿用 `event_history` 的保留数量并持久化在 `state_dir/events.jsonl`。
 
 `pm up` 是 `pm daemon` 的短别名，参数会原样传递，因此 `pm up -d` 等价于 `pm daemon -d`。
 
-`status` 会显示状态、持久化模式、PID、TCP 监听端口、CPU、内存、直接子进程、全部后代进程、Go goroutine、运行时间、启动次数和退出信息。`list` 是更精简的概览，显示名称、分组、状态、PID、TCP 监听端口、运行时间和描述。上述进程操作都接受多个进程名或 `all`。
+`status` 会显示状态、持久化模式、PID、TCP 监听端口、CPU、内存、直接子进程、全部后代进程、Go goroutine、运行时间、启动次数、优先级和退出信息。`list` 是更精简的概览，显示名称、分组、状态、PID、TCP 监听端口、运行时间和描述。
 
 `stop` 只停止当前运行实例，daemon 或机器重启后仍会按 `autostart` 再次启动。`pause` 和 `disable` 会持久化标记并停止程序，之后 PM 被 systemd 重启也不会拉起它；分别使用 `resume` 和 `enable` 清除标记并立即启动。`autostart: false` 的程序始终只手动启动。
 
@@ -204,6 +214,7 @@ ssh -L 19090:127.0.0.1:19090 user@host
 | `web.listen` | HTTP 监听地址 | `127.0.0.1:19090` |
 | `web.username` | Web 后台登录用户名（须与 `password` 同时配置） | 空 |
 | `web.password` | Web 后台登录密码 | 空 |
+| `include` | 引入额外进程配置文件的 glob 列表 | `[]` |
 
 ### 进程字段
 
@@ -211,17 +222,20 @@ ssh -L 19090:127.0.0.1:19090 user@host
 | --- | --- | --- |
 | `name` | 唯一进程名，不允许空白字符（支持中文等 Unicode） | 必填 |
 | `description` | 进程备注/介绍，不允许换行，至多 256 字符 | 空 |
-| `group` | 进程分组 | `default` |
+| `group` | 进程分组，可作为 CLI/Web 操作目标 | `default` |
 | `command` | 可执行文件；不会经过 shell 解析 | 必填 |
 | `args` | 参数数组 | `[]` |
 | `directory` | 工作目录 | 守护进程当前目录 |
 | `environment` | 追加或覆盖环境变量 | `{}` |
 | `autostart` | 守护进程启动时运行 | `true` |
+| `priority` | 启动升序 / 停止降序的排序权重，相同按名称排序 | `999` |
 | `restart` | `never`、`unexpected` 或 `always` | `unexpected` |
 | `restart_delay` | 自动重启前等待时间 | `1s` |
 | `max_restarts` | 时间窗内最大重启次数；`0` 为不限 | `5` |
 | `restart_window` | 重启次数统计窗口 | `1m` |
-| `stop_signal` | `TERM`、`INT`、`QUIT` 或 `HUP` | `TERM` |
+| `exit_codes` | `unexpected` 策略下的预期退出码列表；命中则不重启 | `[0]` 语义（仅 0） |
+| `start_secs` | 启动稳定窗口；存活超过该时长才进入 RUNNING，之前退出视为启动失败并重试 | `0s`（关闭） |
+| `stop_signal` | `TERM`、`INT`、`QUIT`、`HUP`、`USR1` 或 `USR2` | `TERM` |
 | `stop_timeout` | 强制结束前等待时间 | `10s` |
 | `stdout_log` | 标准输出日志 | 继承守护进程输出 |
 | `stderr_log` | 标准错误日志；可与 stdout 使用同一文件 | 继承守护进程输出 |
@@ -230,6 +244,10 @@ ssh -L 19090:127.0.0.1:19090 user@host
 | `pprof_url` | Go pprof 基础地址，用于采集 goroutine 数 | 空（不采集） |
 
 `command` 不经过 shell。需要管道、重定向或循环时，应显式使用 `"command": "/bin/sh"` 和 `"args": ["-c", "..."]`。
+
+`command`、`args`、`directory`、`environment` 值和日志路径支持 `${VAR}` 环境变量展开：读取守护进程自身的环境变量（如 systemd 的 `Environment=`），未定义的变量展开为空字符串。不含 `${}` 的文本（如 shell 片段里的 `$HOME`）原样传递给子进程。
+
+重启语义：`unexpected` 只在退出码不在预期集合内时重启（默认预期集合仅 `0`，可用 `exit_codes` 扩展，如脚本用 `3` 表示正常收尾）；`always` 任何退出都重启；`never` 从不重启。配置了 `start_secs`（默认 `0s` 关闭）时，进程先进入 `STARTING`，存活满该时长才转为 `RUNNING`；在窗口内退出——无论退出码——都视为启动失败并按重启策略重试，秒退的程序因此不会伪装成“正常运行过”。时间窗内重启超过 `max_restarts` 次进入 `FATAL`，`pm reset-restarts` 可清零后重试。`priority` 决定批量启动（升序）和批量停止（降序）的顺序，依赖服务应配置更小的数字。
 
 子进程指标由 PM 从操作系统的 PID/PPID 关系自动采集。TCP 端口仅统计处于 `LISTEN` 状态的 socket，并把主进程及全部后代进程持有的端口去重后展示；Linux 从 `/proc` 读取，macOS 通过系统 `lsof` 读取。操作系统无法仅凭 PID 得知 Go runtime 的 goroutine 数；Go 程序需要引入 `net/http/pprof`、启动仅本机可访问的 HTTP 监听，并配置 pprof 基础地址：
 
@@ -241,7 +259,50 @@ PM 请求该地址下的 `/goroutine?debug=1`，单次采集超时为 750ms。�
 
 Web 后台可以通过“添加进程”和进程详情中的“编辑配置”完成常用配置，不需要直接编辑 YAML。原始配置编辑器仍保留给高级场景。
 
-后台保存配置时会先写入 `pm.yaml.bak`，再通过同目录临时文件原子替换原配置。进程配置采用差量 reload：未变化的进程保持原 PID，新增、删除或运行参数变化只影响对应进程，单纯修改分组不会重启进程。Socket、Web 监听、状态目录和事件容量变更需要重启守护进程。
+后台保存配置时会先写入 `pm.yaml.bak`，再通过同目录临时文件原子替换原配置。进程配置采用差量 reload：未变化的进程保持原 PID，新增、删除或运行参数变化只影响对应进程，单纯修改分组或优先级不会重启进程。Socket、Web 监听、状态目录和事件容量变更需要重启守护进程。
+
+### 配置拆分（include）
+
+多个应用或部署包共用一个 PM 实例时，可以把进程分散到独立文件，避免共同维护单个 `pm.yaml`：
+
+```yaml
+# pm.yaml（主配置）
+include:
+  - conf.d/*.yaml
+```
+
+```yaml
+# conf.d/my-app.yaml（drop-in 文件）
+programs:
+  - name: my-app
+    command: /opt/my-app/bin/server
+```
+
+规则：
+
+- 主配置与 drop-in 都可以定义 `programs`，按文件名顺序合并；`pm reload` 重新匹配 glob，新增文件自动纳入。
+- drop-in 文件只能包含 `programs` 和嵌套 `include`；`socket`、`web`、`state_dir` 等守护进程字段只认主文件，写进 drop-in 会报错。
+- 跨文件同名进程直接报错，指明两个来源文件；include 环也会被检测。
+- drop-in 中进程的相对路径以该 drop-in 所在目录为基准，conf.d 目录整体搬迁不需要改路径。
+- Web 后台的“添加进程”写入主配置；include 文件中的进程在 Web 上编辑或删除会被拒绝，错误信息会指出所属文件，防止改错地方。
+- `pm check -config FILE` 会展开 include 后整体校验，适合部署脚本和 CI。
+
+### 从 supervisor 迁移
+
+`pm import-supervisor` 把现有 supervisor 配置转换成 PM 的主配置 + conf.d 结构：
+
+```bash
+pm import-supervisor /etc/supervisor -out ~/.pm    # 目录（递归扫描 *.conf/*.ini）
+pm import-supervisor /etc/supervisor/supervisord.conf -out ~/.pm   # 单文件
+```
+
+转换会生成 `<out>/pm.yaml`（含 `include: conf.d/*.yaml`）和 `<out>/conf.d/<进程名>.yaml`，完成后自动用 PM 的加载器整体校验。字段映射：`autorestart`→`restart`、`startsecs`→`start_secs`、`startretries`→`max_restarts`、`exitcodes`→`exit_codes`、`stopsignal`/`stopwaitsecs`→`stop_signal`/`stop_timeout`、`priority`→`priority`、`[group:x]`→进程的 `group` 字段、`%(ENV_X)s`→`${X}`。目标已存在时拒绝覆盖，加 `-force` 覆盖。`user=`、`umask`、`numprocs`、`[eventlistener:x]` 等 PM 不支持的配置会给出警告并跳过——PM 以发起用户身份运行子进程，需要降权时用 systemd 的 `User=` 托管 PM。
+
+迁移后先 `pm check` 确认，再启动：
+
+```bash
+pm check -config ~/.pm/pm.yaml && pm daemon -config ~/.pm/pm.yaml
+```
 
 ## 系统托管
 

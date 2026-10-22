@@ -19,8 +19,13 @@ web:
   password: ""
   # 旧版的 token / token_env 已废弃，不再作为认证方式；配置了会启动报错，请删除。
 
+# 配置拆分（可选）：把进程分散到独立文件（类似 supervisor 的 conf.d）。
+# include 文件只能包含 programs；守护进程级字段只认本文件。详见 README。
+# include:
+#   - conf.d/*.yaml
+
 # 受管进程列表。每个条目省略的字段会使用默认值，见 README 字段表。
-# 默认为空；如需托管进程，按下面的样例添加。
+# 默认为空；如需托管进程，按下面的样例添加，或使用 Web 后台 / pm import-supervisor。
 programs: []
   # - name: example-worker
   #   # 可选：进程用途/备注，便于在列表与 Web 后台识别。
@@ -33,12 +38,18 @@ programs: []
   #   environment:
   #     APP_ENV: local
   #   autostart: true
+  #   # 启动/停止顺序：数字小的先启动、后停止。
+  #   priority: 999
   #   # 重启策略：never | unexpected | always
   #   restart: unexpected
   #   restart_delay: 1s
   #   max_restarts: 5
   #   restart_window: 1m
-  #   # 停止信号：TERM | INT | QUIT | HUP
+  #   # 预期退出码（unexpected 策略下命中则不重启）；留空表示仅 0。
+  #   # exit_codes: [0, 3]
+  #   # 启动稳定时间：此前退出视为启动失败并重试；0s 关闭。
+  #   start_secs: 0s
+  #   # 停止信号：TERM | INT | QUIT | HUP | USR1 | USR2
   #   stop_signal: TERM
   #   stop_timeout: 10s
   #   stdout_log: logs/example-worker.log

@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -512,6 +513,10 @@ func (s *Server) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 	writeControlResponse(w, s.backend.Execute(control.Request{Action: action, Names: names}))
 }
 
+// updatePrograms applies mutate to the loaded program set and rewrites the
+// MAIN configuration file. Programs contributed by include files stay owned by
+// those files: they may pass through unchanged, but modifying or removing one
+// is rejected with a pointer to its file.
 func (s *Server) updatePrograms(mutate func([]config.Program) ([]config.Program, error)) error {
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
@@ -519,10 +524,40 @@ func (s *Server) updatePrograms(mutate func([]config.Program) ([]config.Program,
 	if err != nil {
 		return err
 	}
-	cfg.Programs, err = mutate(cfg.Programs)
+	mainPath, err := filepath.Abs(s.backend.ConfigPath())
+	if err != nil {
+		mainPath = s.backend.ConfigPath()
+	}
+	// Ownership must be captured before mutate: handlers edit the slice in
+	// place, which would erase the Source provenance otherwise.
+	included := make(map[string]config.Program)
+	for _, program := range cfg.Programs {
+		if program.Source != "" && program.Source != mainPath {
+			included[program.Name] = program
+		}
+	}
+	next, err := mutate(cfg.Programs)
 	if err != nil {
 		return err
 	}
+	kept := make(map[string]struct{}, len(included))
+	mainPrograms := make([]config.Program, 0, len(next))
+	for _, program := range next {
+		if owner, foreign := included[program.Name]; foreign {
+			if !reflect.DeepEqual(program, owner) {
+				return fmt.Errorf("program %q is defined in include file %s; edit or remove it there instead", program.Name, owner.Source)
+			}
+			kept[program.Name] = struct{}{}
+			continue
+		}
+		mainPrograms = append(mainPrograms, program)
+	}
+	for name, owner := range included {
+		if _, present := kept[name]; !present {
+			return fmt.Errorf("program %q is defined in include file %s; edit or remove it there instead", name, owner.Source)
+		}
+	}
+	cfg.Programs = mainPrograms
 	if err := cfg.Validate(); err != nil {
 		return err
 	}

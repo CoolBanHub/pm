@@ -234,6 +234,7 @@
         <div class="form-field"><label for="process-name">进程名称</label><input id="process-name" required pattern="[^\s]+"></div>
         <div class="form-field wide"><label for="process-description">描述</label><input id="process-description" placeholder="可选：进程用途/备注" maxlength="256"></div>
         <div class="form-field"><label for="process-group">所属分组</label><input id="process-group" list="group-options" value="default" required><datalist id="group-options"></datalist></div>
+        <div class="form-field"><label for="process-priority">启动优先级</label><input id="process-priority" type="number" value="999" title="数字小的先启动、后停止；相同数字按名称排序"></div>
         <div class="form-field wide"><label for="process-command">启动命令</label><input id="process-command" required placeholder="/absolute/path/to/app"></div>
         <div class="form-field wide"><label for="process-args">参数</label><textarea id="process-args" rows="4" placeholder="每行一个参数"></textarea></div>
         <div class="form-field wide"><label for="process-directory">工作目录</label><input id="process-directory" placeholder="相对于配置文件或绝对路径"></div>
@@ -243,7 +244,9 @@
         <div class="form-field"><label for="process-restart-delay">重启延迟</label><input id="process-restart-delay" value="1s" required></div>
         <div class="form-field"><label for="process-max-restarts">最大重启次数</label><input id="process-max-restarts" type="number" min="0" value="5" required></div>
         <div class="form-field"><label for="process-restart-window">重启统计窗口</label><input id="process-restart-window" value="1m" required></div>
-        <div class="form-field"><label for="process-stop-signal">停止信号</label><select id="process-stop-signal"><option>TERM</option><option>INT</option><option>QUIT</option><option>HUP</option></select></div>
+        <div class="form-field"><label for="process-exit-codes">预期退出码</label><input id="process-exit-codes" placeholder="逗号分隔，如 0,3；留空表示仅 0"></div>
+        <div class="form-field"><label for="process-start-secs">启动稳定时间</label><input id="process-start-secs" value="0s" required title="进程存活该时长后才算启动成功（STARTING→RUNNING）；此之前退出视为启动失败，按重启策略重试"></div>
+        <div class="form-field"><label for="process-stop-signal">停止信号</label><select id="process-stop-signal"><option>TERM</option><option>INT</option><option>QUIT</option><option>HUP</option><option>USR1</option><option>USR2</option></select></div>
         <div class="form-field"><label for="process-stop-timeout">停止超时</label><input id="process-stop-timeout" value="10s" required></div>
         <div class="form-field wide"><label for="process-stdout">标准输出日志</label><input id="process-stdout" placeholder="logs/app.log"></div>
         <div class="form-field wide"><label for="process-stderr">标准错误日志</label><input id="process-stderr" placeholder="logs/app.error.log"></div>

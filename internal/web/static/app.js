@@ -371,7 +371,7 @@ function actionButtons(process) {
   if (process.paused) {
     return `${logs}<button class="button primary" data-action="resume" data-name="${escapeAttr(process.name)}">恢复</button>`;
   }
-  if (process.state === 'RUNNING' || process.state === 'BACKOFF' || process.state === 'STOPPING') {
+  if (isActiveState(process.state)) {
     return `${logs}<button class="button secondary" data-action="restart" data-name="${escapeAttr(process.name)}">重启</button><button class="button secondary" data-action="stop" data-name="${escapeAttr(process.name)}">停止</button><button class="button secondary" data-action="pause" data-name="${escapeAttr(process.name)}">暂停</button>`;
   }
   return `${logs}<button class="button secondary" data-action="pause" data-name="${escapeAttr(process.name)}">暂停</button><button class="button primary" data-action="start" data-name="${escapeAttr(process.name)}">启动</button>`;
@@ -381,7 +381,7 @@ function rowActionButtons(process) {
   let primary = '';
   if (process.paused) {
     primary = `<button class="button primary" data-action="resume" data-name="${escapeAttr(process.name)}">恢复</button>`;
-  } else if (process.state === 'RUNNING' || process.state === 'BACKOFF' || process.state === 'STOPPING') {
+  } else if (isActiveState(process.state)) {
     primary = `<button class="button secondary" data-action="restart" data-name="${escapeAttr(process.name)}">重启</button><button class="button secondary" data-action="stop" data-name="${escapeAttr(process.name)}">停止</button>`;
   } else {
     primary = `<button class="button primary" data-action="start" data-name="${escapeAttr(process.name)}">启动</button>`;
@@ -399,7 +399,11 @@ function moreMenuMarkup(process) {
 
 // 运行中（或正在启动/停止/退避重试）的进程删除前会先被停止
 function isProcessActive(process) {
-  return ['RUNNING', 'BACKOFF', 'STARTING', 'STOPPING'].includes(process.state);
+  return isActiveState(process.state);
+}
+
+function isActiveState(processState) {
+  return ['RUNNING', 'BACKOFF', 'STARTING', 'STOPPING'].includes(processState);
 }
 
 function deleteConfirmText(name, process) {
@@ -813,6 +817,7 @@ function fillProcessForm(program) {
   $('#process-name').value = program.name || '';
   $('#process-description').value = program.description || '';
   $('#process-group').value = program.group || 'default';
+  $('#process-priority').value = program.priority ?? 999;
   $('#process-command').value = program.command || '';
   $('#process-args').value = (program.args || []).join('\n');
   $('#process-directory').value = program.directory || '';
@@ -822,6 +827,8 @@ function fillProcessForm(program) {
   $('#process-restart-delay').value = program.restart_delay || '1s';
   $('#process-max-restarts').value = program.max_restarts ?? 5;
   $('#process-restart-window').value = program.restart_window || '1m';
+  $('#process-exit-codes').value = (program.exit_codes || []).join(',');
+  $('#process-start-secs').value = program.start_secs || '0s';
   $('#process-stop-signal').value = program.stop_signal || 'TERM';
   $('#process-stop-timeout').value = program.stop_timeout || '10s';
   $('#process-stdout').value = program.stdout_log || '';
@@ -839,12 +846,21 @@ function processFormValue() {
     if (separator <= 0) throw new Error(`环境变量格式错误：${line}`);
     environment[line.slice(0, separator).trim()] = line.slice(separator + 1);
   }
+  const exitCodes = [];
+  for (const raw of $('#process-exit-codes').value.split(',')) {
+    const code = raw.trim(); if (!code) continue;
+    const parsed = Number(code);
+    if (!Number.isInteger(parsed) || parsed < -1 || parsed > 255) throw new Error(`预期退出码必须是 -1 到 255 的整数：${code}`);
+    exitCodes.push(parsed);
+  }
   return {
     name: $('#process-name').value.trim(), description: $('#process-description').value.trim(), group: $('#process-group').value.trim(), command: $('#process-command').value.trim(),
     args: $('#process-args').value.split('\n').map(value => value.trim()).filter(Boolean),
     directory: $('#process-directory').value.trim(), environment, autostart: $('#process-autostart').checked,
+    priority: Number($('#process-priority').value),
     restart: $('#process-restart').value, restart_delay: $('#process-restart-delay').value.trim(),
     max_restarts: Number($('#process-max-restarts').value), restart_window: $('#process-restart-window').value.trim(),
+    exit_codes: exitCodes, start_secs: $('#process-start-secs').value.trim(),
     stop_signal: $('#process-stop-signal').value, stop_timeout: $('#process-stop-timeout').value.trim(),
     stdout_log: $('#process-stdout').value.trim(), stderr_log: $('#process-stderr').value.trim(),
     pprof_url: $('#process-pprof-url').value.trim(),

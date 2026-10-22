@@ -19,6 +19,7 @@ import (
 
 const (
 	StateStopped  = "STOPPED"
+	StateStarting = "STARTING"
 	StateRunning  = "RUNNING"
 	StateStopping = "STOPPING"
 	StateExited   = "EXITED"
@@ -49,6 +50,7 @@ type Status struct {
 	Autostart   bool      `json:"autostart"`
 	Paused      bool      `json:"paused"`
 	Disabled    bool      `json:"disabled"`
+	Priority    int       `json:"priority"`
 	Restart     string    `json:"restart_policy"`
 	CPU         float64   `json:"cpu_percent"`
 	Memory      int64     `json:"memory_bytes"`
@@ -63,10 +65,14 @@ type Status struct {
 type Process struct {
 	mu sync.Mutex
 
-	config      config.Program
-	command     *exec.Cmd
-	state       string
-	desired     bool
+	config  config.Program
+	command *exec.Cmd
+	state   string
+	desired bool
+	// stableRun records whether the current (or most recent) run survived the
+	// start_secs window and therefore counts as a real RUNNING run rather
+	// than a failed start.
+	stableRun   bool
 	runID       uint64
 	intentID    uint64
 	done        chan struct{}
@@ -147,7 +153,6 @@ func (p *Process) startLocked(restart bool) error {
 	intentID := p.intentID
 	p.command = cmd
 	p.done = make(chan struct{})
-	p.state = StateRunning
 	p.startedAt = time.Now()
 	p.exitedAt = time.Time{}
 	p.exitCode = nil
@@ -155,6 +160,14 @@ func (p *Process) startLocked(restart bool) error {
 	p.starts++
 	if restart {
 		p.restarts++
+	}
+	if startWindow, _ := p.config.StartSecsDuration(); startWindow > 0 {
+		p.state = StateStarting
+		p.stableRun = false
+		time.AfterFunc(startWindow, func() { p.markStable(runID) })
+	} else {
+		p.state = StateRunning
+		p.stableRun = true
 	}
 	p.emitLocked("started", "")
 	logs := []io.Closer{stdout}
@@ -175,6 +188,18 @@ func (p *Process) failStartLocked(err error) error {
 	return err
 }
 
+// markStable promotes a STARTING run to RUNNING once it has survived the
+// configured start window. A newer run, an exited process, or a concurrent
+// stop leaves the state untouched.
+func (p *Process) markStable(runID uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.runID == runID && p.command != nil && p.state == StateStarting {
+		p.state = StateRunning
+		p.stableRun = true
+	}
+}
+
 func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}, logs ...io.Closer) {
 	err := cmd.Wait()
 	for _, writer := range logs {
@@ -188,6 +213,7 @@ func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}
 		p.mu.Unlock()
 		return
 	}
+	failedStart := !p.stableRun
 	p.command = nil
 	p.exitedAt = now
 	p.exitCode = &code
@@ -200,7 +226,7 @@ func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}
 	close(done)
 	p.emitLocked("exited", p.lastError)
 
-	shouldRestart := p.desired && p.intentID == intentID && (p.config.Restart == "always" || (p.config.Restart == "unexpected" && code != 0))
+	shouldRestart := p.desired && p.intentID == intentID && restartWanted(p.config, code, failedStart)
 	if !shouldRestart {
 		p.desired = false
 		p.mu.Unlock()
@@ -229,7 +255,7 @@ func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}
 	p.emitLocked("backoff", fmt.Sprintf("restarting in %s", p.config.RestartDelay))
 	snapshot := RestartSnapshot{
 		Trigger:     "automatic",
-		Reason:      automaticRestartReason(code, p.config.Restart),
+		Reason:      automaticRestartReason(p.config, code, failedStart),
 		PreviousPID: cmd.Process.Pid,
 		StartedAt:   p.startedAt,
 		Uptime:      formatDuration(now.Sub(p.startedAt)),
@@ -251,11 +277,32 @@ func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}
 	_ = p.startLocked(true)
 }
 
-func automaticRestartReason(code int, policy string) string {
-	if code != 0 {
-		return fmt.Sprintf("process exited with code %d", code)
+// restartWanted decides whether an exited process should be restarted. A run
+// that never survived its start window is a failed start and retries under
+// every policy except never, regardless of exit code (supervisor's startsecs
+// semantics); afterwards the "unexpected" policy applies the configured
+// expected exit codes.
+func restartWanted(cfg config.Program, exitCode int, failedStart bool) bool {
+	switch cfg.Restart {
+	case "always":
+		return true
+	case "never":
+		return false
 	}
-	return fmt.Sprintf("process exited and restart policy is %s", policy)
+	if failedStart {
+		return true
+	}
+	return !cfg.ExpectedExit(exitCode)
+}
+
+func automaticRestartReason(cfg config.Program, exitCode int, failedStart bool) string {
+	if failedStart {
+		return fmt.Sprintf("process exited with code %d during start window", exitCode)
+	}
+	if !cfg.ExpectedExit(exitCode) {
+		return fmt.Sprintf("process exited with unexpected code %d", exitCode)
+	}
+	return fmt.Sprintf("process exited and restart policy is %s", cfg.Restart)
 }
 
 func intPointer(value int) *int {
@@ -343,6 +390,7 @@ func (p *Process) Status() Status {
 		Autostart:   p.config.Autostart,
 		Paused:      p.config.Paused,
 		Disabled:    p.config.Disabled,
+		Priority:    p.config.Priority,
 		Restart:     p.config.Restart,
 		PprofURL:    p.config.PprofURL,
 	}
@@ -481,7 +529,7 @@ func (m *Manager) Apply(programs []config.Program) error {
 			continue
 		}
 		status := process.Status()
-		wasActive := status.State == StateRunning || status.State == StateBackoff || status.State == StateStopping
+		wasActive := status.State == StateStarting || status.State == StateRunning || status.State == StateBackoff || status.State == StateStopping
 		if err := process.Stop(); err != nil {
 			errs = append(errs, err)
 			continue
@@ -514,19 +562,26 @@ func (p *Process) UpdateMetadata(program config.Program) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.config.Group = program.Group
+	p.config.Priority = program.Priority
 	p.config.Autostart = program.Autostart
 	p.config.Paused = program.Paused
 	p.config.Disabled = program.Disabled
 	p.config.PprofURL = program.PprofURL
+	p.config.Source = program.Source
 	p.emitLocked("configured", "metadata updated")
 }
 
+// runtimeEqual compares programs ignoring fields that never require a process
+// restart: group, autostart, pause/disable markers, priority (ordering-only),
+// pprof URL, and the defining file.
 func runtimeEqual(left, right config.Program) bool {
 	left.Group, right.Group = "", ""
 	left.Autostart, right.Autostart = false, false
 	left.Paused, right.Paused = false, false
 	left.Disabled, right.Disabled = false, false
+	left.Priority, right.Priority = 0, 0
 	left.PprofURL, right.PprofURL = "", ""
+	left.Source, right.Source = "", ""
 	return reflect.DeepEqual(left, right)
 }
 
@@ -579,9 +634,13 @@ func (m *Manager) EventStore() *EventStore {
 }
 
 func (m *Manager) Autostart() []error {
-	var errs []error
+	ordered := make([]*Process, 0, len(m.processes))
 	for _, name := range m.names() {
-		process := m.processes[name]
+		ordered = append(ordered, m.processes[name])
+	}
+	sortByPriority(ordered, false)
+	var errs []error
+	for _, process := range ordered {
 		if shouldAutostart(process.config) {
 			if err := process.Start(); err != nil {
 				errs = append(errs, err)
@@ -591,16 +650,35 @@ func (m *Manager) Autostart() []error {
 	return errs
 }
 
+// Start launches the selected processes in ascending priority so low-priority
+// dependencies come up first.
 func (m *Manager) Start(names []string) error {
-	return m.each(names, (*Process).Start)
+	selected, err := m.selectProcesses(names)
+	if err != nil {
+		return err
+	}
+	sortByPriority(selected, false)
+	return runEach(selected, (*Process).Start)
 }
 
+// Stop halts the selected processes in descending priority so dependents stop
+// before the services they rely on.
 func (m *Manager) Stop(names []string) error {
-	return m.each(names, (*Process).Stop)
+	selected, err := m.selectProcesses(names)
+	if err != nil {
+		return err
+	}
+	sortByPriority(selected, true)
+	return runEach(selected, (*Process).Stop)
 }
 
 func (m *Manager) Restart(names []string) error {
-	return m.each(names, func(p *Process) error {
+	selected, err := m.selectProcesses(names)
+	if err != nil {
+		return err
+	}
+	sortByPriority(selected, false)
+	return runEach(selected, func(p *Process) error {
 		status := p.Status()
 		if err := p.Stop(); err != nil {
 			return err
@@ -743,6 +821,10 @@ func (m *Manager) each(names []string, action func(*Process) error) error {
 	if err != nil {
 		return err
 	}
+	return runEach(selected, action)
+}
+
+func runEach(selected []*Process, action func(*Process) error) error {
 	var errs []error
 	for _, process := range selected {
 		if err := action(process); err != nil {
@@ -752,19 +834,69 @@ func (m *Manager) each(names []string, action func(*Process) error) error {
 	return errors.Join(errs...)
 }
 
+// groupTarget recognizes the two accepted group selectors: "group:web" and
+// supervisor-style "web:*". Both address every program in group web.
+func groupTarget(name string) (string, bool) {
+	if group, ok := strings.CutPrefix(name, "group:"); ok && group != "" {
+		return group, true
+	}
+	if group, ok := strings.CutSuffix(name, ":*"); ok && group != "" {
+		return group, true
+	}
+	return "", false
+}
+
 func (m *Manager) selectProcesses(names []string) ([]*Process, error) {
 	if len(names) == 0 || (len(names) == 1 && names[0] == "all") {
 		names = m.names()
 	}
 	selected := make([]*Process, 0, len(names))
+	seen := make(map[*Process]struct{}, len(names))
 	for _, name := range names {
+		if group, isGroup := groupTarget(name); isGroup {
+			matched := false
+			for _, processName := range m.names() {
+				process := m.processes[processName]
+				if process.config.Group != group {
+					continue
+				}
+				matched = true
+				if _, duplicate := seen[process]; !duplicate {
+					seen[process] = struct{}{}
+					selected = append(selected, process)
+				}
+			}
+			if !matched {
+				return nil, fmt.Errorf("unknown group %q", group)
+			}
+			continue
+		}
 		process, ok := m.processes[name]
 		if !ok {
 			return nil, fmt.Errorf("unknown program %q", name)
 		}
-		selected = append(selected, process)
+		if _, duplicate := seen[process]; !duplicate {
+			seen[process] = struct{}{}
+			selected = append(selected, process)
+		}
 	}
 	return selected, nil
+}
+
+// sortByPriority orders processes for lifecycle operations: startup runs in
+// ascending priority (dependencies first), shutdown in descending priority so
+// dependents stop first. Name order breaks ties deterministically.
+func sortByPriority(list []*Process, shutdown bool) {
+	sort.SliceStable(list, func(i, j int) bool {
+		left, right := list[i].config, list[j].config
+		if left.Priority != right.Priority {
+			if shutdown {
+				return left.Priority > right.Priority
+			}
+			return left.Priority < right.Priority
+		}
+		return left.Name < right.Name
+	})
 }
 
 func (m *Manager) names() []string {
@@ -820,6 +952,10 @@ func stopSignal(name string) syscall.Signal {
 		return syscall.SIGQUIT
 	case "HUP":
 		return syscall.SIGHUP
+	case "USR1":
+		return syscall.SIGUSR1
+	case "USR2":
+		return syscall.SIGUSR2
 	default:
 		return syscall.SIGTERM
 	}

@@ -45,11 +45,13 @@ pm [-socket PATH] daemon [-config FILE] [-d] [-log FILE]
 pm [-socket PATH] up [-config FILE] [-d] [-log FILE]  # alias for daemon
 pm systemd [-config FILE]                    # Linux system service installation (run with sudo)
 pm update                                      # download and install latest GitHub release
-pm [-socket PATH] status [NAME...]        # full details for all or named programs
-pm [-socket PATH] list   [NAME...]        # compact overview including PID, TCP ports and uptime
-pm [-socket PATH] start|stop|restart NAME|all
-pm [-socket PATH] reset-restarts NAME|all
-pm [-socket PATH] pause|resume|disable|enable NAME|all
+pm check [-config FILE]                    # offline config validation (follows includes)
+pm import-supervisor SRC [-out DIR] [-force]  # convert supervisor config to PM config
+pm [-socket PATH] status [NAME|GROUP...]   # full details for all or named programs
+pm [-socket PATH] list   [NAME|GROUP...]   # compact overview including PID, TCP ports and uptime
+pm [-socket PATH] start|stop|restart NAME|GROUP|all
+pm [-socket PATH] reset-restarts NAME|GROUP|all
+pm [-socket PATH] pause|resume|disable|enable NAME|GROUP|all
 pm [-socket PATH] reload                  # hot-reload program config from disk
 pm [-socket PATH] shutdown                # stop the daemon (and all managed programs)
 pm [-socket PATH] down                    # alias for shutdown
@@ -60,11 +62,15 @@ pm version
 
 `status` shows full detail (state, PID, TCP listening ports, CPU, memory,
 child/descendant process counts, Go goroutines when configured, uptime, start
-count, exit code, last error). `list` is a compact quick overview. Process actions accept several
-names or the literal `all`. `stop` is temporary: an autostart program starts
-again after a daemon restart. `pause` and `disable` persist their markers and
-prevent autostart; `resume` and `enable` clear the corresponding marker and
-start the program immediately.
+count, priority, exit code, last error). `list` is a compact quick overview.
+Process actions accept several names, group targets, or the literal `all`.
+Groups are addressed as `group:NAME` or supervisor-style `NAME:*`, e.g.
+`pm stop group:web`. Batch operations run in `priority` order: startup
+ascending (lower priority value first), shutdown descending (dependents stop
+first). `stop` is temporary: an autostart program starts again after a daemon
+restart. `pause` and `disable` persist their markers and prevent autostart;
+`resume` and `enable` clear the corresponding marker and start the program
+immediately.
 
 `restart` validates and re-reads `pm.yaml` before stopping the selected
 programs, so changes to environment variables, arguments, and log paths take
@@ -113,6 +119,7 @@ load and on web edits; the daemon refuses to start on invalid config.
 | `web.listen` | HTTP listen address | `127.0.0.1:19090` |
 | `web.username` | web login username (must pair with `password`) | empty |
 | `web.password` | web login password | empty |
+| `include` | glob list of drop-in files contributing extra programs | `[]` |
 
 ### Program fields
 
@@ -120,23 +127,31 @@ load and on web edits; the daemon refuses to start on invalid config.
 | --- | --- | --- |
 | `name` | unique program name; no whitespace (Unicode such as CJK is allowed) | required |
 | `description` | optional note/summary; no newlines, max 256 chars | empty |
-| `group` | grouping for filtering | `default` |
+| `group` | grouping; valid target for CLI/web actions | `default` |
 | `command` | executable; NOT parsed by a shell | required |
 | `args` | argument list | `[]` |
 | `directory` | working directory | daemon's cwd |
 | `environment` | env vars to add/override | `{}` |
 | `autostart` | start when the daemon starts | `true` |
+| `priority` | startup order weight: lower starts first, stops last; ties by name | `999` |
 | `restart` | `never` / `unexpected` / `always` | `unexpected` |
 | `restart_delay` | wait before auto-restart | `1s` |
 | `max_restarts` | max restarts in the window; `0` = unlimited | `5` |
 | `restart_window` | restart-count window | `1m` |
-| `stop_signal` | `TERM` / `INT` / `QUIT` / `HUP` | `TERM` |
+| `exit_codes` | expected exit codes under `unexpected`; matching codes do not restart | only `0` |
+| `start_secs` | startup grace window; early exit counts as failed start and retries | `0s` (off) |
+| `stop_signal` | `TERM` / `INT` / `QUIT` / `HUP` / `USR1` / `USR2` | `TERM` |
 | `stop_timeout` | grace period before force-killing the tree | `10s` |
 | `stdout_log` | stdout log path | inherits daemon output |
 | `stderr_log` | stderr log path (may equal stdout_log) | inherits daemon output |
 | `log_max_bytes` | per-file rotation threshold; `0` = no rotation | `10485760` |
 | `log_backups` | rotated backups to keep | `3` |
 | `pprof_url` | Go pprof base URL for goroutine count | empty (disabled) |
+
+`command`, `args`, `directory`, `environment` values, and log paths support
+`${VAR}` expansion from the daemon's own environment (undefined → empty string).
+Text without `${}` (e.g. `$HOME` inside a shell snippet) passes through to the
+child untouched.
 
 Child and descendant counts are collected automatically from OS process
 relationships. TCP metrics contain only listening ports and include sockets
@@ -146,10 +161,53 @@ listener and set, for example,
 `pprof_url: http://127.0.0.1:6060/debug/pprof`. PM reads the goroutine profile
 with a 750ms timeout. Do not expose pprof directly to the public internet.
 
-Restart semantics: `unexpected` restarts only on non-zero exit; `always`
-restarts on any exit; `never` does not. Too many restarts within
-`restart_window` push the program into `FATAL`. `command` is not shell-parsed —
-for pipes/redirection/loops use `command: /bin/sh` and `args: ["-c", "..."]`.
+Restart semantics: `unexpected` restarts only when the exit code is NOT in the
+expected set (default `{0}`, extend with `exit_codes`, e.g. `[0, 3]` for
+scripts that finish cleanly with 3); `always` restarts on any exit; `never`
+does not. With `start_secs` > 0 a fresh process starts in `STARTING` and
+becomes `RUNNING` only after surviving that window — exiting inside the window
+is a FAILED START and retries under any policy except `never`, even with exit
+code 0. Too many restarts within `restart_window` push the program into
+`FATAL` (`pm reset-restarts` clears the counter). `command` is not
+shell-parsed — for pipes/redirection/loops use `command: /bin/sh` and
+`args: ["-c", "..."]`.
+
+### Config splitting (include)
+
+Split programs across drop-in files, supervisor conf.d style:
+
+```yaml
+# main pm.yaml
+include:
+  - conf.d/*.yaml
+```
+
+Rules: drop-ins may define only `programs` and nested `include` (daemon fields
+belong to the main file and are rejected elsewhere); files merge in name
+order and `pm reload` re-globs so new files are picked up; duplicate program
+names across files and include cycles are errors; relative paths inside a
+drop-in resolve against that drop-in's directory; the web console writes new
+programs to the main file and refuses to edit/delete programs owned by
+include files (the error names the owning file). `pm check -config FILE`
+validates the fully expanded tree offline.
+
+### Migrating from supervisor
+
+```bash
+pm import-supervisor /etc/supervisor -out ~/.pm
+# or a single file: pm import-supervisor /etc/supervisor/supervisord.conf -out ~/.pm
+pm check -config ~/.pm/pm.yaml && pm daemon -config ~/.pm/pm.yaml
+```
+
+Converts `[program:x]` and `[group:x]` sections into `<out>/pm.yaml` plus one
+`<out>/conf.d/<name>.yaml` per program, validating the result with PM's own
+loader. Mapping: `autorestart`→`restart`, `startsecs`→`start_secs`,
+`startretries`→`max_restarts`, `exitcodes`→`exit_codes`, `stopsignal`/
+`stopwaitsecs`→`stop_signal`/`stop_timeout`, `priority`→`priority`,
+`[group:x]`→`group` field, `%(ENV_X)s`→`${X}`. Unsupported keys (`user=`,
+`umask=`, `numprocs`, `[eventlistener:x]`) produce warnings; PM runs programs
+as the invoking user, so drop privileges via the systemd unit's `User=`.
+Existing output is not overwritten without `-force`.
 
 ### Example
 
@@ -172,10 +230,13 @@ programs:
     environment:
       APP_ENV: local
     autostart: true
+    priority: 999
     restart: unexpected
     restart_delay: 1s
     max_restarts: 5
     restart_window: 1m
+    exit_codes: [0, 3]
+    start_secs: 0s
     stop_signal: TERM
     stop_timeout: 10s
     stdout_log: logs/example-worker.log
@@ -211,11 +272,14 @@ or an SSH tunnel in front for cross-machine access:
 
 ## reload vs restart
 
-`pm reload` re-reads `~/.pm/pm.yaml` and applies a DIFFERENTIAL update: unchanged
-programs keep their PID; only added/removed/changed programs are affected, and
-merely changing a `group` does not restart a program. Changes to `socket`,
-`web`, `state_dir`, or `event_history` are NOT hot-applicable and require a
-daemon restart (`pm shutdown` then `pm daemon`).
+`pm reload` re-reads `~/.pm/pm.yaml` (following includes) and applies a
+DIFFERENTIAL update: unchanged programs keep their PID; only added/removed/
+changed programs are affected, and merely changing a `group` or `priority`
+does not restart a program. Changes to `socket`, `web`, `state_dir`, or
+`event_history` are NOT hot-applicable and require a daemon restart
+(`pm shutdown` then `pm daemon`). `pm check -config FILE` validates a config
+(including include expansion) without touching the daemon — use it before
+deploy scripts or CI.
 
 The web console edits config safely: it writes `<config>.bak`, then atomically
 replaces the config via a temp file in the same directory.
@@ -224,7 +288,13 @@ replaces the config via a temp file in the same directory.
 
 - Add a process: append a program entry to `~/.pm/pm.yaml`, then `pm reload`.
   To manage it without reloading other programs, the differential reload keeps
-  existing PIDs stable.
+  existing PIDs stable. For multi-app machines prefer a drop-in file under
+  `~/.pm/conf.d/<name>.yaml` (the main config's `include` picks it up).
+- Operate a whole group: `pm stop group:web` (or `web:*`); ordering follows
+  each program's `priority`.
+- Validate config offline (no daemon interaction): `pm check -config FILE`.
+- Migrate from supervisor: `pm import-supervisor /etc/supervisor -out ~/.pm`,
+  review warnings, then `pm check` and start the daemon.
 - Tail logs: `pm logs -f -n 200 NAME` (stdout); add `-stderr` for stderr.
 - Check health: `pm list` for a fast scan, `pm status NAME` for detail.
 - Stop everything: `pm stop all`. Stop the daemon: `pm shutdown`.
