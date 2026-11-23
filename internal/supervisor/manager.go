@@ -488,9 +488,22 @@ type Manager struct {
 	states    *ProgramStateStore
 	modeMu    sync.Mutex
 	disk      atomic.Pointer[DiskMonitor]
+	// retiring counts removed processes whose shutdown is still in flight.
+	retiring sync.WaitGroup
 }
 
+// Apply reconciles the managed set with programs: removed processes are
+// stopped, changed ones restarted, and new ones started.
 func (m *Manager) Apply(programs []config.Program) error {
+	removed, err := m.ApplyDetached(programs)
+	return errors.Join(err, m.StopRemoved(removed))
+}
+
+// ApplyDetached works like Apply except that removed processes are only
+// detached from the managed set and returned; the caller must hand them to
+// StopRemoved. Stopping can block for a process's whole stop timeout, so a
+// caller that holds a lock can release it before waiting.
+func (m *Manager) ApplyDetached(programs []config.Program) ([]*Process, error) {
 	programs = m.states.Apply(programs)
 	programNames := make([]string, 0, len(programs))
 	next := make(map[string]config.Program, len(programs))
@@ -498,15 +511,14 @@ func (m *Manager) Apply(programs []config.Program) error {
 		next[program.Name] = program
 		programNames = append(programNames, program.Name)
 	}
+	var removed []*Process
 	var errs []error
 	for name, process := range m.processes {
 		program, exists := next[name]
 		if !exists {
-			if err := process.Stop(); err != nil {
-				errs = append(errs, err)
-				continue
-			}
 			delete(m.processes, name)
+			removed = append(removed, process)
+			m.retiring.Add(1)
 			continue
 		}
 		delete(next, name)
@@ -553,9 +565,22 @@ func (m *Manager) Apply(programs []config.Program) error {
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		return err
+		return removed, err
 	}
-	return m.states.Prune(programNames)
+	return removed, m.states.Prune(programNames)
+}
+
+// StopRemoved stops the processes detached by ApplyDetached, waiting for each
+// to exit. It must run without any lock that status readers need.
+func (m *Manager) StopRemoved(removed []*Process) error {
+	var errs []error
+	for _, process := range removed {
+		if err := process.Stop(); err != nil {
+			errs = append(errs, err)
+		}
+		m.retiring.Done()
+	}
+	return errors.Join(errs...)
 }
 
 func (p *Process) UpdateMetadata(program config.Program) {
@@ -800,8 +825,12 @@ func (m *Manager) setMode(names []string, update func(ProgramMode) ProgramMode, 
 	return errors.Join(errs...)
 }
 
+// StopAll stops every managed program, then waits for removed programs that
+// are still shutting down so none outlives the daemon.
 func (m *Manager) StopAll() error {
-	return m.Stop([]string{"all"})
+	err := m.Stop([]string{"all"})
+	m.retiring.Wait()
+	return err
 }
 
 func (m *Manager) Status(names []string) ([]Status, error) {

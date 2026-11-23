@@ -2,10 +2,12 @@ package control
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -146,6 +148,68 @@ func TestRestartUsesLatestProgramEnvironment(t *testing.T) {
 	}
 	if after[0].PID == 0 || after[0].PID == before[0].PID {
 		t.Fatalf("process was not restarted: before=%+v after=%+v", before[0], after[0])
+	}
+}
+
+func TestReloadStopsRemovedProgramWithoutBlockingStatus(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "pm.yaml")
+	program := config.DefaultProgram()
+	program.Name = "stubborn"
+	program.Command = "/bin/sh"
+	program.Args = []string{"-c", `trap "" TERM; while true; do sleep 1; done`}
+	program.Restart = "never"
+	program.StopTimeout = "1s"
+	cfg := config.Config{
+		Socket: filepath.Join(dir, "pm.sock"), StateDir: filepath.Join(dir, ".pm"), EventHistory: 1000,
+		Web: config.Web{Enabled: false}, Programs: []config.Program{program},
+	}
+	writeControlConfig(t, configPath, cfg)
+	manager := supervisor.New(cfg.Programs)
+	defer manager.StopAll()
+	server := NewServer(cfg, configPath, manager, func() {}, log.New(io.Discard, "", 0))
+	if response := server.Execute(Request{Action: "start", Names: []string{"stubborn"}}); !response.OK {
+		t.Fatal(response.Message)
+	}
+	before, err := manager.Status([]string{"stubborn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Programs = nil
+	writeControlConfig(t, configPath, cfg)
+	reloaded := make(chan Response, 1)
+	go func() { reloaded <- server.Execute(Request{Action: "reload"}) }()
+	// The program leaves the managed set as soon as the reload applies, while
+	// its shutdown is still pending.
+	deadline := time.Now().Add(time.Second)
+	for server.Execute(Request{Action: "status", Names: []string{"stubborn"}}).OK {
+		if time.Now().After(deadline) {
+			t.Fatal("reload did not remove the program")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case response := <-reloaded:
+		t.Fatalf("reload finished before the stop timeout elapsed: %+v", response)
+	default:
+	}
+	started := time.Now()
+	response := server.Execute(Request{Action: "status"})
+	if elapsed := time.Since(started); !response.OK || elapsed > 500*time.Millisecond {
+		t.Fatalf("status took %s while a removed program was stopping: %+v", elapsed, response)
+	}
+
+	select {
+	case response := <-reloaded:
+		if !response.OK {
+			t.Fatal(response.Message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reload did not finish")
+	}
+	if err := syscall.Kill(before[0].PID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("removed program survived the reload: %v", err)
 	}
 }
 

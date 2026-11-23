@@ -1,9 +1,11 @@
 package supervisor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -244,6 +246,41 @@ func TestManagerApplyOnlyRestartsChangedProcesses(t *testing.T) {
 	}
 	if _, err := manager.Status([]string{"second"}); err == nil {
 		t.Fatal("removed process is still registered")
+	}
+}
+
+func TestManagerApplyDetachedLeavesRemovedProcessRunning(t *testing.T) {
+	program := testProgram("stubborn", `trap "" TERM; while true; do sleep 1; done`)
+	program.StopTimeout = "300ms"
+	manager := New([]config.Program{program})
+	defer manager.StopAll()
+	if err := manager.Start([]string{"stubborn"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := manager.Status([]string{"stubborn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := manager.ApplyDetached(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("removed = %+v", removed)
+	}
+	if _, err := manager.Status([]string{"stubborn"}); err == nil {
+		t.Fatal("removed process is still registered")
+	}
+	if err := syscall.Kill(before[0].PID, 0); err != nil {
+		t.Fatalf("removed process was stopped before StopRemoved: %v", err)
+	}
+
+	if err := manager.StopRemoved(removed); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(before[0].PID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("removed process survived StopRemoved: %v", err)
 	}
 }
 

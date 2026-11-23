@@ -56,6 +56,9 @@ type Server struct {
 
 	mu      sync.RWMutex
 	manager *supervisor.Manager
+	// reloadMu serializes reloads: one must finish stopping the programs it
+	// removed before the next applies.
+	reloadMu sync.Mutex
 }
 
 func NewServer(cfg config.Config, configPath string, manager *supervisor.Manager, cancel context.CancelFunc, logger *log.Logger) *Server {
@@ -188,13 +191,18 @@ func (s *Server) reload() Response {
 		return Response{OK: false, Message: err.Error()}
 	}
 
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
 	s.mu.Lock()
 	current := s.manager
-	if err := current.Apply(cfg.Programs); err != nil {
-		s.mu.Unlock()
+	removed, err := current.ApplyDetached(cfg.Programs)
+	s.mu.Unlock()
+	// Removed programs are stopped without holding s.mu: a slow shutdown takes
+	// up to the stop timeout and must not stall the status reads sharing it.
+	err = errors.Join(err, current.StopRemoved(removed))
+	if err != nil {
 		return Response{OK: false, Message: "apply configuration: " + err.Error()}
 	}
-	s.mu.Unlock()
 	return Response{OK: true, Message: "configuration reloaded"}
 }
 

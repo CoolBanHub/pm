@@ -536,6 +536,7 @@ body.hide-col-restarts .col-restarts, body.hide-col-restarts .cell-restarts { di
 .toast.error { border-left-color: var(--red); }
 .toast::after { content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--accent); opacity: .35; transform-origin: left; animation: toastBar 3.5s linear forwards; }
 .toast.error::after { background: var(--red); }
+.toast.sticky::after { display: none; }
 .toast.leaving { animation: toastOut .25s ease forwards; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes toastOut { to { opacity: 0; transform: translateX(20px); } }

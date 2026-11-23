@@ -880,10 +880,12 @@ $('#process-form').addEventListener('submit', async event => {
 });
 
 async function deleteProcess(name) {
+  // A running process is stopped before it is removed, which waits for its stop timeout.
+  const done = pendingToast(`正在停止并删除进程 ${name}…`);
   try {
-    const result = await api(`/api/v1/processes/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    toast(result.message || '进程已删除'); state.selectedNames.delete(name); closeDrawer(); await refreshAll();
-  } catch (error) { toast(error.message, true); }
+    await api(`/api/v1/processes/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    done(); toast(`进程 ${name} 已删除`); state.selectedNames.delete(name); closeDrawer(); await refreshAll();
+  } catch (error) { done(); toast(error.message, true); }
 }
 
 /* ============================================================
@@ -923,13 +925,21 @@ function closeConfirm() { $('#confirm-modal').classList.add('hidden'); state.con
 /* ============================================================
    Toast (animated + dismissible)
    ============================================================ */
-function toast(message, error = false) {
-  const item = document.createElement('div'); item.className = `toast ${error ? 'error' : ''}`; item.textContent = message;
+// duration 0 keeps the toast up until the returned remove() is called.
+function toast(message, error = false, duration = 3500) {
+  const item = document.createElement('div'); item.className = `toast ${error ? 'error' : ''}${duration ? '' : ' sticky'}`; item.textContent = message;
   let timer;
   const remove = () => { clearTimeout(timer); item.classList.add('leaving'); setTimeout(() => item.remove(), 240); };
   item.addEventListener('click', remove);
   $('#toasts').appendChild(item);
-  timer = setTimeout(remove, 3500);
+  if (duration) timer = setTimeout(remove, duration);
+  return remove;
+}
+// Toast that appears only when an operation is still running after delay ms; the returned function dismisses it.
+function pendingToast(message, delay = 400) {
+  let dismiss;
+  const timer = setTimeout(() => { dismiss = toast(message, false, 0); }, delay);
+  return () => { clearTimeout(timer); dismiss?.(); };
 }
 
 /* ============================================================
