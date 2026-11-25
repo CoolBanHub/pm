@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/CoolBanHub/pm/internal/config"
@@ -54,11 +53,9 @@ type Server struct {
 	cancel     context.CancelFunc
 	logger     *log.Logger
 
-	mu      sync.RWMutex
+	// manager is fixed for the server's life and serializes its own work per
+	// process, so every action below runs without a lock of its own.
 	manager *supervisor.Manager
-	// reloadMu serializes reloads: one must finish stopping the programs it
-	// removed before the next applies.
-	reloadMu sync.Mutex
 }
 
 func NewServer(cfg config.Config, configPath string, manager *supervisor.Manager, cancel context.CancelFunc, logger *log.Logger) *Server {
@@ -119,47 +116,32 @@ func (s *Server) handle(connection net.Conn) {
 func (s *Server) dispatch(request Request) (Response, bool) {
 	switch request.Action {
 	case "status":
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		manager := s.manager
-		statuses, err := manager.Status(request.Names)
+		// Never held up by a stop or restart in progress, so polling is live
+		// while a slow process shuts down.
+		statuses, err := s.manager.Status(request.Names)
 		if err == nil {
 			supervisor.CollectMetrics(statuses)
-			manager.ApplyDiskUsage(statuses)
+			s.manager.ApplyDiskUsage(statuses)
 		}
 		resp := result(statuses, err)
 		resp.Host = supervisor.CachedHostInfo()
-		resp.DiskTotal = manager.DiskTotal()
+		resp.DiskTotal = s.manager.DiskTotal()
 		return resp, false
 	case "start":
-		s.mu.RLock()
-		defer s.mu.RUnlock()
 		return resultMessage("started "+targets(request.Names), s.manager.Start(request.Names)), false
 	case "stop":
-		s.mu.RLock()
-		defer s.mu.RUnlock()
 		return resultMessage("stopped "+targets(request.Names), s.manager.Stop(request.Names)), false
 	case "restart":
 		return s.restart(request.Names), false
 	case "reset-restarts":
-		s.mu.RLock()
-		defer s.mu.RUnlock()
 		return resultMessage("reset restart count for "+targets(request.Names), s.manager.ResetRestarts(request.Names)), false
 	case "pause":
-		s.mu.RLock()
-		defer s.mu.RUnlock()
 		return resultMessage("paused "+targets(request.Names), s.manager.Pause(request.Names)), false
 	case "resume":
-		s.mu.RLock()
-		defer s.mu.RUnlock()
 		return resultMessage("resumed "+targets(request.Names), s.manager.Resume(request.Names)), false
 	case "disable":
-		s.mu.RLock()
-		defer s.mu.RUnlock()
 		return resultMessage("disabled "+targets(request.Names), s.manager.Disable(request.Names)), false
 	case "enable":
-		s.mu.RLock()
-		defer s.mu.RUnlock()
 		return resultMessage("enabled "+targets(request.Names), s.manager.Enable(request.Names)), false
 	case "reload":
 		return s.reload(), false
@@ -176,8 +158,6 @@ func (s *Server) Execute(request Request) Response {
 }
 
 func (s *Server) Events(after uint64, limit int) []supervisor.Event {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	return s.manager.Events(after, limit)
 }
 
@@ -190,17 +170,7 @@ func (s *Server) reload() Response {
 	if err != nil {
 		return Response{OK: false, Message: err.Error()}
 	}
-
-	s.reloadMu.Lock()
-	defer s.reloadMu.Unlock()
-	s.mu.Lock()
-	current := s.manager
-	removed, err := current.ApplyDetached(cfg.Programs)
-	s.mu.Unlock()
-	// Removed programs are stopped without holding s.mu: a slow shutdown takes
-	// up to the stop timeout and must not stall the status reads sharing it.
-	err = errors.Join(err, current.StopRemoved(removed))
-	if err != nil {
+	if err := s.manager.Apply(cfg.Programs); err != nil {
 		return Response{OK: false, Message: "apply configuration: " + err.Error()}
 	}
 	return Response{OK: true, Message: "configuration reloaded"}
@@ -211,8 +181,6 @@ func (s *Server) restart(names []string) Response {
 	if err != nil {
 		return Response{OK: false, Message: err.Error()}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	return resultMessage("restarted "+targets(names), s.manager.RestartConfigured(names, cfg.Programs))
 }
 
@@ -229,8 +197,6 @@ func (s *Server) loadRuntimeConfig() (config.Config, error) {
 }
 
 func (s *Server) Manager() *supervisor.Manager {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	return s.manager
 }
 

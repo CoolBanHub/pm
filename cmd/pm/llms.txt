@@ -284,6 +284,20 @@ deploy scripts or CI.
 The web console edits config safely: it writes `<config>.bak`, then atomically
 replaces the config via a temp file in the same directory.
 
+Removing or changing a running program waits for the old process to exit (up
+to its `stop_timeout`). Other programs' actions and status polling are not
+delayed while it waits, and every program that must exit in one reload stops
+at the same time. If a process cannot be stopped (for example it runs as
+another user and PM lacks permission to signal it), it stays listed with its
+last error and later reloads leave it alone until it exits or its definition
+changes again.
+
+After a process exits, a descendant that inherited its output can keep the
+run open for at most one more `stop_timeout`. Past that the run is over:
+whatever is left of the process group is killed, the exit carries a last
+error saying so, and a descendant in a session of its own is left running
+but its output is no longer recorded.
+
 ## Common tasks for agents
 
 - Add a process: append a program entry to `~/.pm/pm.yaml`, then `pm reload`.

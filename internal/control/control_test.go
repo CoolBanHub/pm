@@ -154,15 +154,10 @@ func TestRestartUsesLatestProgramEnvironment(t *testing.T) {
 func TestReloadStopsRemovedProgramWithoutBlockingStatus(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "pm.yaml")
-	program := config.DefaultProgram()
-	program.Name = "stubborn"
-	program.Command = "/bin/sh"
-	program.Args = []string{"-c", `trap "" TERM; while true; do sleep 1; done`}
-	program.Restart = "never"
-	program.StopTimeout = "1s"
+	readyPath := filepath.Join(dir, "ready")
 	cfg := config.Config{
 		Socket: filepath.Join(dir, "pm.sock"), StateDir: filepath.Join(dir, ".pm"), EventHistory: 1000,
-		Web: config.Web{Enabled: false}, Programs: []config.Program{program},
+		Web: config.Web{Enabled: false}, Programs: []config.Program{stubbornProgram(readyPath)},
 	}
 	writeControlConfig(t, configPath, cfg)
 	manager := supervisor.New(cfg.Programs)
@@ -171,6 +166,7 @@ func TestReloadStopsRemovedProgramWithoutBlockingStatus(t *testing.T) {
 	if response := server.Execute(Request{Action: "start", Names: []string{"stubborn"}}); !response.OK {
 		t.Fatal(response.Message)
 	}
+	waitForFileContent(t, readyPath, "")
 	before, err := manager.Status([]string{"stubborn"})
 	if err != nil {
 		t.Fatal(err)
@@ -211,6 +207,145 @@ func TestReloadStopsRemovedProgramWithoutBlockingStatus(t *testing.T) {
 	if err := syscall.Kill(before[0].PID, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("removed program survived the reload: %v", err)
 	}
+}
+
+func TestStatusStaysResponsiveDuringSlowRestart(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "pm.yaml")
+	readyPath := filepath.Join(dir, "ready")
+	cfg := config.Config{
+		Socket: filepath.Join(dir, "pm.sock"), StateDir: filepath.Join(dir, ".pm"), EventHistory: 1000,
+		Web: config.Web{Enabled: false}, Programs: []config.Program{stubbornProgram(readyPath)},
+	}
+	writeControlConfig(t, configPath, cfg)
+	manager := supervisor.New(cfg.Programs)
+	defer manager.StopAll()
+	server := NewServer(cfg, configPath, manager, func() {}, log.New(io.Discard, "", 0))
+	if response := server.Execute(Request{Action: "start", Names: []string{"stubborn"}}); !response.OK {
+		t.Fatal(response.Message)
+	}
+	waitForFileContent(t, readyPath, "")
+	before, err := manager.Status([]string{"stubborn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := make(chan Response, 1)
+	go func() { restarted <- server.Execute(Request{Action: "restart", Names: []string{"stubborn"}}) }()
+	// Status must observe the restart in progress instead of waiting for it.
+	deadline := time.Now().Add(time.Second)
+	for {
+		response := server.Execute(Request{Action: "status", Names: []string{"stubborn"}})
+		if !response.OK {
+			t.Fatalf("unexpected status response: %+v", response)
+		}
+		if response.Processes[0].State == supervisor.StateStopping {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("status never observed the restart stopping the program")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case response := <-restarted:
+		t.Fatalf("restart finished before the stop timeout elapsed: %+v", response)
+	default:
+	}
+	started := time.Now()
+	response := server.Execute(Request{Action: "status"})
+	if elapsed := time.Since(started); !response.OK || len(response.Processes) != 1 || elapsed > 500*time.Millisecond {
+		t.Fatalf("status took %s during a slow restart: %+v", elapsed, response)
+	}
+
+	select {
+	case response := <-restarted:
+		if !response.OK {
+			t.Fatal(response.Message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not finish")
+	}
+	after, err := manager.Status([]string{"stubborn"})
+	if err != nil || after[0].State != supervisor.StateRunning || after[0].PID == before[0].PID {
+		t.Fatalf("program was not restarted: before=%+v after=%+v err=%v", before[0], after[0], err)
+	}
+}
+
+func TestActionsDoNotWaitForSlowRestart(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "pm.yaml")
+	readyPath := filepath.Join(dir, "ready")
+	quick := config.DefaultProgram()
+	quick.Name = "quick"
+	quick.Command = "/bin/sh"
+	quick.Args = []string{"-c", "sleep 30"}
+	quick.Restart = "never"
+	cfg := config.Config{
+		Socket: filepath.Join(dir, "pm.sock"), StateDir: filepath.Join(dir, ".pm"), EventHistory: 1000,
+		Web: config.Web{Enabled: false}, Programs: []config.Program{stubbornProgram(readyPath), quick},
+	}
+	writeControlConfig(t, configPath, cfg)
+	manager := supervisor.New(cfg.Programs)
+	defer manager.StopAll()
+	server := NewServer(cfg, configPath, manager, func() {}, log.New(io.Discard, "", 0))
+	if response := server.Execute(Request{Action: "start", Names: []string{"stubborn", "quick"}}); !response.OK {
+		t.Fatal(response.Message)
+	}
+	waitForFileContent(t, readyPath, "")
+
+	restarted := make(chan Response, 1)
+	go func() { restarted <- server.Execute(Request{Action: "restart", Names: []string{"stubborn"}}) }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		response := server.Execute(Request{Action: "status", Names: []string{"stubborn"}})
+		if !response.OK {
+			t.Fatalf("unexpected status response: %+v", response)
+		}
+		if response.Processes[0].State == supervisor.StateStopping {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("restart never began stopping the program")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Another program must not queue behind the restart's slow shutdown.
+	started := time.Now()
+	response := server.Execute(Request{Action: "stop", Names: []string{"quick"}})
+	if elapsed := time.Since(started); !response.OK || elapsed > 500*time.Millisecond {
+		t.Fatalf("stopping another program took %s during a slow restart: %+v", elapsed, response)
+	}
+	select {
+	case response := <-restarted:
+		t.Fatalf("restart finished before the stop timeout elapsed: %+v", response)
+	default:
+	}
+	select {
+	case response := <-restarted:
+		if !response.OK {
+			t.Fatal(response.Message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not finish")
+	}
+	// Status lists programs by name: quick, then stubborn.
+	if statuses, err := manager.Status(nil); err != nil || len(statuses) != 2 || statuses[0].Name != "quick" || statuses[0].State != supervisor.StateStopped || statuses[1].State != supervisor.StateRunning {
+		t.Fatalf("unexpected final states: %+v, err = %v", statuses, err)
+	}
+}
+
+// stubbornProgram ignores SIGTERM and, once its trap is installed, creates an
+// empty readyPath so a test never signals it before it is ready to ignore that.
+func stubbornProgram(readyPath string) config.Program {
+	program := config.DefaultProgram()
+	program.Name = "stubborn"
+	program.Command = "/bin/sh"
+	program.Args = []string{"-c", `trap "" TERM; : > "$READY_PATH"; while true; do sleep 1; done`}
+	program.Environment = map[string]string{"READY_PATH": readyPath}
+	program.Restart = "never"
+	program.StopTimeout = "1s"
+	return program
 }
 
 func writeControlConfig(t *testing.T, path string, cfg config.Config) {

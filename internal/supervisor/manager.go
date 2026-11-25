@@ -64,6 +64,10 @@ type Status struct {
 
 type Process struct {
 	mu sync.Mutex
+	// transition serializes the lifecycle changes to this one process (start,
+	// stop, restart, replacement) so they never interleave. The Manager holds
+	// it while waiting for the process to exit, and nothing else.
+	transition sync.Mutex
 
 	config  config.Program
 	command *exec.Cmd
@@ -72,9 +76,12 @@ type Process struct {
 	// stableRun records whether the current (or most recent) run survived the
 	// start_secs window and therefore counts as a real RUNNING run rather
 	// than a failed start.
-	stableRun   bool
-	runID       uint64
-	intentID    uint64
+	stableRun bool
+	runID     uint64
+	intentID  uint64
+	// exited is closed once the process of the run has exited, and done once
+	// its output has been written too, which a descendant can delay.
+	exited      chan struct{}
 	done        chan struct{}
 	startedAt   time.Time
 	exitedAt    time.Time
@@ -83,8 +90,17 @@ type Process struct {
 	starts      int
 	restarts    int
 	restartRuns []time.Time
-	events      *EventStore
+	// stopFailed and pending record a change that could not be applied because
+	// the process would not stop: pending is nil when that change was its
+	// removal, or the definition it should have been replaced by.
+	stopFailed bool
+	pending    *config.Program
+	events     *EventStore
 }
+
+// signalGroup delivers a signal to a managed process's process group. It is a
+// variable so tests can simulate a process the daemon is not allowed to signal.
+var signalGroup = syscall.Kill
 
 func NewProcess(cfg config.Program) *Process {
 	return newProcess(cfg, nil)
@@ -133,25 +149,67 @@ func (p *Process) startLocked(restart bool) error {
 			return p.failStartLocked(fmt.Errorf("open stderr log: %w", err))
 		}
 	}
-	if stdout != nil {
-		cmd.Stdout = stdout
+	// The child writes to pipes rather than straight to the log files so that
+	// the logs keep rotating. A run has nothing left to write once the process
+	// and every descendant that inherited a pipe are gone.
+	var streams []*output
+	var writers []io.Closer
+	attach := func(log io.WriteCloser, toStderr bool) error {
+		stream, writer, err := newOutput(cmd, log, toStderr)
+		if err != nil {
+			return err
+		}
+		streams = append(streams, stream)
+		writers = append(writers, writer)
+		return nil
 	}
-	if stderr != nil {
-		cmd.Stderr = stderr
+	if stdout != nil {
+		if err := attach(stdout, false); err != nil {
+			closeLog(stdout)
+			if !sharedLog {
+				closeLog(stderr)
+			}
+			return p.failStartLocked(fmt.Errorf("open stdout log: %w", err))
+		}
+		if sharedLog {
+			cmd.Stderr = cmd.Stdout
+		}
+	}
+	if stderr != nil && !sharedLog {
+		if err := attach(stderr, true); err != nil {
+			for _, writer := range writers {
+				writer.Close()
+			}
+			for _, stream := range streams {
+				stream.abandon()
+			}
+			closeLog(stdout)
+			closeLog(stderr)
+			return p.failStartLocked(fmt.Errorf("open stderr log: %w", err))
+		}
 	}
 
 	if err := cmd.Start(); err != nil {
-		closeLog(stdout)
-		if !sharedLog {
-			closeLog(stderr)
+		for _, writer := range writers {
+			writer.Close()
+		}
+		// Closing the read ends ends the copies, which closes the log files.
+		for _, stream := range streams {
+			stream.abandon()
 		}
 		return p.failStartLocked(fmt.Errorf("start %s: %w", p.config.Name, err))
+	}
+	// The child has its own copies; until the parent's are closed the pipes
+	// never report that every writer is gone.
+	for _, writer := range writers {
+		writer.Close()
 	}
 
 	p.runID++
 	runID := p.runID
 	intentID := p.intentID
 	p.command = cmd
+	p.exited = make(chan struct{})
 	p.done = make(chan struct{})
 	p.startedAt = time.Now()
 	p.exitedAt = time.Time{}
@@ -170,11 +228,12 @@ func (p *Process) startLocked(restart bool) error {
 		p.stableRun = true
 	}
 	p.emitLocked("started", "")
-	logs := []io.Closer{stdout}
-	if !sharedLog {
-		logs = append(logs, stderr)
+	grace, err := p.config.StopTimeoutDuration()
+	if err != nil {
+		// Only a definition that bypassed validation gets here.
+		grace, _ = config.DefaultProgram().StopTimeoutDuration()
 	}
-	go p.wait(cmd, runID, intentID, p.done, logs...)
+	go p.wait(cmd, runID, intentID, p.done, grace, streams)
 	return nil
 }
 
@@ -200,10 +259,84 @@ func (p *Process) markStable(runID uint64) {
 	}
 }
 
-func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}, logs ...io.Closer) {
+// output is one of a run's output streams. The process writes to it, and so
+// does every descendant that inherits it: drained is closed once the last of
+// them has let go of it.
+type output struct {
+	reader  *os.File
+	drained chan struct{}
+	// copyErr is the error that ended the copy, if any. It is set before
+	// drained is closed.
+	copyErr error
+}
+
+// newOutput makes log the destination of the child's stdout or stderr: the
+// child gets the write end of a pipe, and a goroutine copies the pipe into log
+// until nothing holds that end. The caller closes its copy of the write end
+// once the child has started.
+func newOutput(cmd *exec.Cmd, log io.WriteCloser, toStderr bool) (*output, io.Closer, error) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	if toStderr {
+		cmd.Stderr = writer
+	} else {
+		cmd.Stdout = writer
+	}
+	stream := &output{reader: reader, drained: make(chan struct{})}
+	go func() {
+		defer close(stream.drained)
+		defer closeLog(log)
+		defer reader.Close()
+		_, stream.copyErr = io.Copy(log, reader)
+	}()
+	return stream, writer, nil
+}
+
+// abandon closes the read end, which ends the copy even while something still
+// holds the write end.
+func (o *output) abandon() { _ = o.reader.Close() }
+
+// wait reports the end of a run once its process has exited and its output has
+// been written. A descendant still writing after the process exited gets the
+// time a stop may take to finish; past that the run is over, what is left of
+// the process group is killed, and the stream is let go.
+func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}, grace time.Duration, streams []*output) {
 	err := cmd.Wait()
-	for _, writer := range logs {
-		closeLog(writer)
+	close(p.exited)
+	deadline := time.After(grace)
+	var (
+		cut     bool
+		copyErr error
+	)
+	for _, stream := range streams {
+		select {
+		case <-stream.drained:
+			copyErr = errors.Join(copyErr, stream.copyErr)
+		case <-deadline:
+			cut = true
+		}
+		if cut {
+			break
+		}
+	}
+	var notes []string
+	if err != nil {
+		notes = append(notes, err.Error())
+	} else if copyErr != nil {
+		notes = append(notes, copyErr.Error())
+	}
+	if cut {
+		for _, stream := range streams {
+			stream.abandon()
+		}
+		// A descendant in a session of its own is out of reach; the rest of
+		// the process group is not.
+		notes = append(notes, "background process kept the output open after the process exited")
+		if leftover := alreadyGone(signalGroup(-cmd.Process.Pid, syscall.SIGKILL)); leftover != nil {
+			notes = append(notes, leftover.Error())
+		}
 	}
 	now := time.Now()
 	code := cmd.ProcessState.ExitCode()
@@ -218,11 +351,7 @@ func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}
 	p.exitedAt = now
 	p.exitCode = &code
 	p.state = StateExited
-	if err != nil {
-		p.lastError = err.Error()
-	} else {
-		p.lastError = ""
-	}
+	p.lastError = strings.Join(notes, "; ")
 	close(done)
 	p.emitLocked("exited", p.lastError)
 
@@ -324,14 +453,18 @@ func (p *Process) Stop() error {
 		return nil
 	}
 	cmd := p.command
-	done := p.done
+	exited, done := p.exited, p.done
 	p.state = StateStopping
 	p.emitLocked("stopping", "")
 	timeout, _ := p.config.StopTimeoutDuration()
 	sig := stopSignal(p.config.StopSignal)
 	p.mu.Unlock()
 
-	err := syscall.Kill(-cmd.Process.Pid, sig)
+	err := signalGroup(-cmd.Process.Pid, sig)
+	if errors.Is(err, syscall.ESRCH) {
+		// No such process group: the process has moved to another one.
+		err = signalGroup(cmd.Process.Pid, sig)
+	}
 	if err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("signal %s: %w", p.config.Name, err)
 	}
@@ -341,7 +474,13 @@ func (p *Process) Stop() error {
 	select {
 	case <-done:
 	case <-timer.C:
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		// Kill the group, and the process itself unless it is known to have
+		// exited: a process that left its group is in the second signal only.
+		err := alreadyGone(signalGroup(-cmd.Process.Pid, syscall.SIGKILL))
+		if !closed(exited) {
+			err = errors.Join(err, alreadyGone(signalGroup(cmd.Process.Pid, syscall.SIGKILL)))
+		}
+		if err != nil {
 			return fmt.Errorf("kill %s: %w", p.config.Name, err)
 		}
 		<-done
@@ -355,6 +494,24 @@ func (p *Process) Stop() error {
 	}
 	p.mu.Unlock()
 	return nil
+}
+
+// alreadyGone drops the error from signaling a process or group that has
+// already exited.
+func alreadyGone(err error) error {
+	if err == nil || errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	return err
+}
+
+func closed(channel <-chan struct{}) bool {
+	select {
+	case <-channel:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *Process) emitLocked(eventType, message string) {
@@ -482,105 +639,264 @@ func readLogTail(path string, limit int64) string {
 	return strings.ToValidUTF8(string(data), "\uFFFD")
 }
 
+// Manager owns the managed processes and is safe for concurrent use. A short
+// lock guards the process table and every process has its own transition lock
+// for lifecycle changes, so waiting for one process to exit never delays
+// requests for the others.
 type Manager struct {
+	mu        sync.RWMutex
 	processes map[string]*Process
-	events    *EventStore
-	states    *ProgramStateStore
-	modeMu    sync.Mutex
-	disk      atomic.Pointer[DiskMonitor]
-	// retiring counts removed processes whose shutdown is still in flight.
-	retiring sync.WaitGroup
+	// closed is set once StopAll begins. Later actions are refused so nothing
+	// starts after the daemon has stopped its programs.
+	closed bool
+
+	events *EventStore
+	states *ProgramStateStore
+	// applyMu serializes reloads: each must finish replacing and stopping
+	// before the next diffs the process table.
+	applyMu sync.Mutex
+	disk    atomic.Pointer[DiskMonitor]
+	// retiring counts the shutdowns a reload started that are still in
+	// flight; retiringIdle is closed whenever the count drops back to zero.
+	retiringMu   sync.Mutex
+	retiring     int
+	retiringIdle chan struct{}
+}
+
+// processSet is a read-only view of the managed processes.
+type processSet map[string]*Process
+
+// shutdown is the old run of a process that must exit before a reload can
+// finish: either the program was removed, or heir is the definition that
+// replaces it.
+type shutdown struct {
+	name string
+	old  *Process
+	heir *config.Program
+}
+
+// refresh is a definition change that needs no restart, only new metadata and
+// possibly a stop or a start.
+type refresh struct {
+	name    string
+	program config.Program
 }
 
 // Apply reconciles the managed set with programs: removed processes are
-// stopped, changed ones restarted, and new ones started.
+// stopped, changed ones restarted, and new ones started. It returns once every
+// affected process has settled. Shutdowns run at the same time and hold
+// nothing but each process's own transition lock, so the whole reload waits at
+// most one stop timeout and never delays requests for other processes.
 func (m *Manager) Apply(programs []config.Program) error {
-	removed, err := m.ApplyDetached(programs)
-	return errors.Join(err, m.StopRemoved(removed))
-}
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
 
-// ApplyDetached works like Apply except that removed processes are only
-// detached from the managed set and returned; the caller must hand them to
-// StopRemoved. Stopping can block for a process's whole stop timeout, so a
-// caller that holds a lock can release it before waiting.
-func (m *Manager) ApplyDetached(programs []config.Program) ([]*Process, error) {
 	programs = m.states.Apply(programs)
-	programNames := make([]string, 0, len(programs))
 	next := make(map[string]config.Program, len(programs))
+	programNames := make([]string, 0, len(programs))
 	for _, program := range programs {
 		next[program.Name] = program
 		programNames = append(programNames, program.Name)
 	}
-	var removed []*Process
-	var errs []error
+
+	// Phase one only rewrites the process table, so it holds nothing while
+	// waiting. New programs are listed at once but stay locked until the old
+	// runs are gone, so a renamed program never races its old port.
+	var (
+		shutdowns []shutdown
+		refreshes []refresh
+		additions []*Process
+	)
+	m.mu.Lock()
 	for name, process := range m.processes {
-		program, exists := next[name]
-		if !exists {
-			delete(m.processes, name)
-			removed = append(removed, process)
-			m.retiring.Add(1)
-			continue
+		program, configured := next[name]
+		if pending, removal, blocked := process.pendingChange(); blocked {
+			if process.alive() && removal == !configured && (removal || runtimeEqual(pending, program)) {
+				// This very change already failed to stop the process: leave it alone.
+				delete(next, name)
+				continue
+			}
+			process.clearPendingChange()
 		}
 		delete(next, name)
-		if reflect.DeepEqual(process.config, program) {
+		if !configured {
+			delete(m.processes, name)
+			shutdowns = append(shutdowns, shutdown{name: name, old: process})
 			continue
 		}
-		if runtimeEqual(process.config, program) {
-			wasBlocked := process.config.Paused || process.config.Disabled
-			process.UpdateMetadata(program)
-			isBlocked := program.Paused || program.Disabled
-			if isBlocked {
-				if err := process.Stop(); err != nil {
-					errs = append(errs, err)
-				}
-			} else if wasBlocked && program.Autostart {
-				if err := process.Start(); err != nil {
-					errs = append(errs, err)
-				}
-			}
-			continue
-		}
-		status := process.Status()
-		wasActive := status.State == StateStarting || status.State == StateRunning || status.State == StateBackoff || status.State == StateStopping
-		if err := process.Stop(); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		replacement := newProcess(program, m.events)
-		m.processes[name] = replacement
-		if wasActive && !program.Paused && !program.Disabled {
-			process.emitRestart(restartSnapshotFromStatus(status, "configuration", "runtime configuration changed"))
-			if err := replacement.Start(); err != nil {
-				errs = append(errs, err)
-			}
+		current := process.program()
+		switch {
+		case reflect.DeepEqual(current, program):
+		case runtimeEqual(current, program):
+			refreshes = append(refreshes, refresh{name: name, program: program})
+		default:
+			heir := program
+			shutdowns = append(shutdowns, shutdown{name: name, old: process, heir: &heir})
 		}
 	}
 	for name, program := range next {
 		process := newProcess(program, m.events)
+		process.transition.Lock()
 		m.processes[name] = process
-		if shouldAutostart(program) {
-			if err := process.Start(); err != nil {
-				errs = append(errs, err)
-			}
+		additions = append(additions, process)
+	}
+	for range shutdowns {
+		m.trackRetiring()
+	}
+	m.mu.Unlock()
+
+	errs := make([]error, len(shutdowns))
+	var stopping sync.WaitGroup
+	for i, item := range shutdowns {
+		stopping.Add(1)
+		go func() {
+			defer stopping.Done()
+			errs[i] = m.settle(item)
+		}()
+	}
+	stopping.Wait()
+	for _, process := range additions {
+		var err error
+		if shouldAutostart(process.program()) {
+			err = m.launch(process)
 		}
+		process.transition.Unlock()
+		errs = append(errs, err)
+	}
+	for _, item := range refreshes {
+		program := m.states.Apply([]config.Program{item.program})[0]
+		errs = append(errs, m.enter(item.name, false, func(p *Process) error { return p.refresh(program) }))
 	}
 	if err := errors.Join(errs...); err != nil {
-		return removed, err
+		return err
 	}
-	return removed, m.states.Prune(programNames)
+	return m.states.Prune(programNames)
 }
 
-// StopRemoved stops the processes detached by ApplyDetached, waiting for each
-// to exit. It must run without any lock that status readers need.
-func (m *Manager) StopRemoved(removed []*Process) error {
-	var errs []error
-	for _, process := range removed {
-		if err := process.Stop(); err != nil {
-			errs = append(errs, err)
-		}
-		m.retiring.Done()
+// settle ends the old run of a removed or superseded process. A superseding
+// definition takes its place once the old run is gone, and starts if that run
+// was active.
+func (m *Manager) settle(item shutdown) error {
+	defer m.untrackRetiring()
+	item.old.transition.Lock()
+	defer item.old.transition.Unlock()
+	status := item.old.Status()
+	if err := item.old.Stop(); err != nil {
+		return m.stuck(item, err)
 	}
-	return errors.Join(errs...)
+	if item.heir == nil {
+		return nil
+	}
+	heir := newProcess(*item.heir, m.events)
+	heir.transition.Lock()
+	defer heir.transition.Unlock()
+	m.mu.Lock()
+	if m.processes[item.name] == item.old {
+		m.processes[item.name] = heir
+	}
+	m.mu.Unlock()
+	if active(status.State) && runnable(*item.heir) {
+		item.old.emitRestart(restartSnapshotFromStatus(status, "configuration", "runtime configuration changed"))
+		return m.launch(heir)
+	}
+	return nil
+}
+
+// stuck records that item's process would not stop. It stays listed with the
+// error, and later reloads retry only a different change, so one process the
+// daemon cannot signal never fails unrelated ones.
+func (m *Manager) stuck(item shutdown, cause error) error {
+	err := fmt.Errorf("%s could not be stopped: %w", item.name, cause)
+	item.old.block(item.heir, err.Error())
+	m.mu.Lock()
+	if _, listed := m.processes[item.name]; !listed {
+		m.processes[item.name] = item.old
+	}
+	m.mu.Unlock()
+	return err
+}
+
+func (m *Manager) trackRetiring() {
+	m.retiringMu.Lock()
+	m.retiring++
+	m.retiringMu.Unlock()
+}
+
+func (m *Manager) untrackRetiring() {
+	m.retiringMu.Lock()
+	defer m.retiringMu.Unlock()
+	if m.retiring--; m.retiring == 0 && m.retiringIdle != nil {
+		close(m.retiringIdle)
+		m.retiringIdle = nil
+	}
+}
+
+// waitRetiring blocks until every shutdown a reload started has finished.
+func (m *Manager) waitRetiring() {
+	for {
+		m.retiringMu.Lock()
+		if m.retiring == 0 {
+			m.retiringMu.Unlock()
+			return
+		}
+		if m.retiringIdle == nil {
+			m.retiringIdle = make(chan struct{})
+		}
+		idle := m.retiringIdle
+		m.retiringMu.Unlock()
+		<-idle
+	}
+}
+
+var errClosed = errors.New("daemon is shutting down")
+
+type unknownProgramError struct{ name string }
+
+func (e *unknownProgramError) Error() string { return fmt.Sprintf("unknown program %q", e.name) }
+
+// enter runs action on the process registered under name while holding that
+// process's transition lock, so changes to one process never interleave and
+// never make other processes wait. A reload may replace the process while the
+// lock is held, in which case action runs on the replacement. Actions are
+// refused once StopAll has begun unless stopping is set.
+func (m *Manager) enter(name string, stopping bool, action func(*Process) error) error {
+	for {
+		m.mu.RLock()
+		process, listed := m.processes[name]
+		closed := m.closed
+		m.mu.RUnlock()
+		if !listed {
+			return &unknownProgramError{name}
+		}
+		process.transition.Lock()
+		m.mu.RLock()
+		current := m.processes[name] == process
+		closed = m.closed
+		m.mu.RUnlock()
+		if !current {
+			process.transition.Unlock()
+			continue
+		}
+		if closed && !stopping {
+			process.transition.Unlock()
+			return errClosed
+		}
+		err := action(process)
+		process.transition.Unlock()
+		return err
+	}
+}
+
+// launch starts process unless the manager is shutting down. The caller holds
+// the process's transition lock, which is what keeps StopAll from racing it.
+func (m *Manager) launch(process *Process) error {
+	m.mu.RLock()
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed {
+		return errClosed
+	}
+	return process.Start()
 }
 
 func (p *Process) UpdateMetadata(program config.Program) {
@@ -594,6 +910,111 @@ func (p *Process) UpdateMetadata(program config.Program) {
 	p.config.PprofURL = program.PprofURL
 	p.config.Source = program.Source
 	p.emitLocked("configured", "metadata updated")
+}
+
+// group reads the group under the process lock. Status resolves group targets
+// while other requests update metadata, so the read must not race them.
+func (p *Process) group() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.config.Group
+}
+
+// program returns a copy of the process's definition under its lock.
+func (p *Process) program() config.Program {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.config
+}
+
+// identity returns the process's name and priority under its lock.
+func (p *Process) identity() (string, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.config.Name, p.config.Priority
+}
+
+// alive reports whether the process currently has a run.
+func (p *Process) alive() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.command != nil
+}
+
+// restart stops the process and starts it again with program. The caller must
+// hold the process's transition lock.
+func (p *Process) restart(program config.Program) error {
+	status := p.Status()
+	if err := p.Stop(); err != nil {
+		return err
+	}
+	p.emitRestart(restartSnapshotFromStatus(status, "manual", "restart requested"))
+	p.mu.Lock()
+	p.config = program
+	p.mu.Unlock()
+	return p.Start()
+}
+
+// refresh applies a definition change that needs no restart: new metadata,
+// plus a stop or a start when the program just became, or stopped being,
+// paused or disabled. The caller must hold the process's transition lock.
+func (p *Process) refresh(program config.Program) error {
+	p.mu.Lock()
+	wasBlocked := p.config.Paused || p.config.Disabled
+	p.mu.Unlock()
+	p.UpdateMetadata(program)
+	switch {
+	case program.Paused || program.Disabled:
+		return p.Stop()
+	case wasBlocked && program.Autostart:
+		return p.Start()
+	}
+	return nil
+}
+
+// pendingChange reports the change that could not be applied because the
+// process would not stop: its removal, or its replacement by program. ok is
+// false while no such change is pending.
+func (p *Process) pendingChange() (program config.Program, removal, ok bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.stopFailed {
+		return config.Program{}, false, false
+	}
+	if p.pending == nil {
+		return config.Program{}, true, true
+	}
+	return *p.pending, false, true
+}
+
+func (p *Process) clearPendingChange() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stopFailed = false
+	p.pending = nil
+}
+
+// block records definition as the change that could not be applied because
+// the process would not stop, and surfaces message on the process and in the
+// event history.
+func (p *Process) block(definition *config.Program, message string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stopFailed = true
+	p.pending = definition
+	p.lastError = message
+	p.emitLocked("fatal", message)
+}
+
+// active reports whether a process in state has a run that a reload carries
+// over to the replacement.
+func active(state string) bool {
+	return state == StateStarting || state == StateRunning || state == StateBackoff || state == StateStopping
+}
+
+// runnable reports whether a program's paused or disabled markers allow it to run.
+func runnable(program config.Program) bool {
+	return !program.Paused && !program.Disabled
 }
 
 // runtimeEqual compares programs ignoring fields that never require a process
@@ -659,10 +1080,13 @@ func (m *Manager) EventStore() *EventStore {
 }
 
 func (m *Manager) Autostart() []error {
-	ordered := make([]*Process, 0, len(m.processes))
-	for _, name := range m.names() {
-		ordered = append(ordered, m.processes[name])
+	m.mu.RLock()
+	set := processSet(m.processes)
+	ordered := make([]*Process, 0, len(set))
+	for _, name := range set.names() {
+		ordered = append(ordered, set[name])
 	}
+	m.mu.RUnlock()
 	sortByPriority(ordered, false)
 	var errs []error
 	for _, process := range ordered {
@@ -683,7 +1107,7 @@ func (m *Manager) Start(names []string) error {
 		return err
 	}
 	sortByPriority(selected, false)
-	return runEach(selected, (*Process).Start)
+	return m.eachTransition(selected, (*Process).Start)
 }
 
 // Stop halts the selected processes in descending priority so dependents stop
@@ -694,7 +1118,7 @@ func (m *Manager) Stop(names []string) error {
 		return err
 	}
 	sortByPriority(selected, true)
-	return runEach(selected, (*Process).Stop)
+	return m.eachTransition(selected, (*Process).Stop)
 }
 
 func (m *Manager) Restart(names []string) error {
@@ -703,14 +1127,18 @@ func (m *Manager) Restart(names []string) error {
 		return err
 	}
 	sortByPriority(selected, false)
-	return runEach(selected, func(p *Process) error {
-		status := p.Status()
-		if err := p.Stop(); err != nil {
-			return err
-		}
-		p.emitRestart(restartSnapshotFromStatus(status, "manual", "restart requested"))
-		return p.Start()
-	})
+	return m.eachTransition(selected, func(p *Process) error { return p.restart(p.program()) })
+}
+
+// eachTransition applies action to each process in turn under that process's
+// transition lock, so a slow one never holds up the rest.
+func (m *Manager) eachTransition(selected []*Process, action func(*Process) error) error {
+	var errs []error
+	for _, process := range selected {
+		name, _ := process.identity()
+		errs = append(errs, m.enter(name, false, action))
+	}
+	return errors.Join(errs...)
 }
 
 func (m *Manager) ResetRestarts(names []string) error {
@@ -731,33 +1159,31 @@ func (m *Manager) RestartConfigured(names []string, programs []config.Program) e
 		return err
 	}
 	type target struct {
+		name    string
 		process *Process
 		program config.Program
 	}
 	targets := make([]target, 0, len(selected))
 	for _, process := range selected {
-		name := process.Status().Name
+		name, _ := process.identity()
 		program, exists := configured[name]
 		if !exists {
 			return fmt.Errorf("program %q is no longer configured; run pm reload", name)
 		}
-		targets = append(targets, target{process: process, program: program})
+		targets = append(targets, target{name: name, process: process, program: program})
 	}
 
 	var errs []error
 	for _, item := range targets {
-		status := item.process.Status()
-		if err := item.process.Stop(); err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		item.process.emitRestart(restartSnapshotFromStatus(status, "manual", "restart requested"))
-		item.process.mu.Lock()
-		item.process.config = item.program
-		item.process.mu.Unlock()
-		if err := item.process.Start(); err != nil {
-			errs = append(errs, err)
-		}
+		errs = append(errs, m.enter(item.name, false, func(p *Process) error {
+			program := item.program
+			if p != item.process {
+				// A reload replaced the process since validation; it already
+				// carries the newest definition.
+				program = p.program()
+			}
+			return p.restart(program)
+		}))
 	}
 	return errors.Join(errs...)
 }
@@ -790,49 +1216,73 @@ func (m *Manager) Enable(names []string) error {
 	}, true)
 }
 
+// setMode persists a paused or disabled change for the selected programs and
+// applies it to each process. The processes take their mode from the persistent
+// state rather than from this call, so concurrent changes to the same program
+// always leave it matching what was persisted last.
 func (m *Manager) setMode(names []string, update func(ProgramMode) ProgramMode, start bool) error {
-	m.modeMu.Lock()
-	defer m.modeMu.Unlock()
 	selected, err := m.selectProcesses(names)
 	if err != nil {
 		return err
 	}
-	resolvedNames := make([]string, 0, len(selected))
+	targets := make([]string, 0, len(selected))
 	for _, process := range selected {
-		resolvedNames = append(resolvedNames, process.Status().Name)
+		name, _ := process.identity()
+		targets = append(targets, name)
 	}
-	if err := m.states.Set(resolvedNames, update); err != nil {
+	if err := m.states.Set(targets, update); err != nil {
 		return err
 	}
 	var errs []error
-	for _, process := range selected {
-		process.mu.Lock()
-		mode := update(ProgramMode{Paused: process.config.Paused, Disabled: process.config.Disabled})
-		process.config.Paused = mode.Paused
-		process.config.Disabled = mode.Disabled
-		blocked := mode.Paused || mode.Disabled
-		process.mu.Unlock()
-		if blocked || !start {
-			if err := process.Stop(); err != nil {
-				errs = append(errs, err)
+	for _, name := range targets {
+		errs = append(errs, m.enter(name, false, func(p *Process) error {
+			mode := m.states.Apply([]config.Program{{Name: name}})[0]
+			p.mu.Lock()
+			p.config.Paused, p.config.Disabled = mode.Paused, mode.Disabled
+			p.mu.Unlock()
+			switch {
+			case mode.Paused || mode.Disabled:
+				return p.Stop()
+			case start:
+				return p.Start()
 			}
-			continue
-		}
-		if err := process.Start(); err != nil {
-			errs = append(errs, err)
-		}
+			return nil
+		}))
 	}
 	return errors.Join(errs...)
 }
 
-// StopAll stops every managed program, then waits for removed programs that
-// are still shutting down so none outlives the daemon.
+// StopAll stops every managed program in priority order and refuses further
+// actions. It waits for the shutdowns a reload still has in flight, so nothing
+// outlives the daemon.
 func (m *Manager) StopAll() error {
-	err := m.Stop([]string{"all"})
-	m.retiring.Wait()
-	return err
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+
+	selected, err := m.selectProcesses([]string{"all"})
+	if err != nil {
+		return err
+	}
+	sortByPriority(selected, true)
+	var errs []error
+	for _, process := range selected {
+		// A reload may take a process out from under StopAll; its own shutdown
+		// covers it, so only other failures are reported.
+		name, _ := process.identity()
+		if err := m.enter(name, true, (*Process).Stop); err != nil {
+			var unknown *unknownProgramError
+			if !errors.As(err, &unknown) {
+				errs = append(errs, err)
+			}
+		}
+	}
+	m.waitRetiring()
+	return errors.Join(errs...)
 }
 
+// Status reports the selected processes. It takes no lock that a stop or
+// restart holds while waiting, so polling never falls behind one.
 func (m *Manager) Status(names []string) ([]Status, error) {
 	selected, err := m.selectProcesses(names)
 	if err != nil {
@@ -875,18 +1325,25 @@ func groupTarget(name string) (string, bool) {
 	return "", false
 }
 
+// selectProcesses resolves programs, groups, and "all" against the process table.
 func (m *Manager) selectProcesses(names []string) ([]*Process, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return selectProcesses(processSet(m.processes), names)
+}
+
+func selectProcesses(set processSet, names []string) ([]*Process, error) {
 	if len(names) == 0 || (len(names) == 1 && names[0] == "all") {
-		names = m.names()
+		names = set.names()
 	}
 	selected := make([]*Process, 0, len(names))
 	seen := make(map[*Process]struct{}, len(names))
 	for _, name := range names {
 		if group, isGroup := groupTarget(name); isGroup {
 			matched := false
-			for _, processName := range m.names() {
-				process := m.processes[processName]
-				if process.config.Group != group {
+			for _, processName := range set.names() {
+				process := set[processName]
+				if process.group() != group {
 					continue
 				}
 				matched = true
@@ -900,7 +1357,7 @@ func (m *Manager) selectProcesses(names []string) ([]*Process, error) {
 			}
 			continue
 		}
-		process, ok := m.processes[name]
+		process, ok := set[name]
 		if !ok {
 			return nil, fmt.Errorf("unknown program %q", name)
 		}
@@ -916,21 +1373,35 @@ func (m *Manager) selectProcesses(names []string) ([]*Process, error) {
 // ascending priority (dependencies first), shutdown in descending priority so
 // dependents stop first. Name order breaks ties deterministically.
 func sortByPriority(list []*Process, shutdown bool) {
-	sort.SliceStable(list, func(i, j int) bool {
-		left, right := list[i].config, list[j].config
-		if left.Priority != right.Priority {
+	type entry struct {
+		process *Process
+		name    string
+		prio    int
+	}
+	entries := make([]entry, len(list))
+	for i, process := range list {
+		entries[i].process = process
+		entries[i].name, entries[i].prio = process.identity()
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		left, right := entries[i], entries[j]
+		if left.prio != right.prio {
 			if shutdown {
-				return left.Priority > right.Priority
+				return left.prio > right.prio
 			}
-			return left.Priority < right.Priority
+			return left.prio < right.prio
 		}
-		return left.Name < right.Name
+		return left.name < right.name
 	})
+	for i := range entries {
+		list[i] = entries[i].process
+	}
 }
 
-func (m *Manager) names() []string {
-	names := make([]string, 0, len(m.processes))
-	for name := range m.processes {
+// names lists the set's processes in sorted order.
+func (set processSet) names() []string {
+	names := make([]string, 0, len(set))
+	for name := range set {
 		names = append(names, name)
 	}
 	sort.Strings(names)

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -249,38 +250,407 @@ func TestManagerApplyOnlyRestartsChangedProcesses(t *testing.T) {
 	}
 }
 
-func TestManagerApplyDetachedLeavesRemovedProcessRunning(t *testing.T) {
-	program := testProgram("stubborn", `trap "" TERM; while true; do sleep 1; done`)
-	program.StopTimeout = "300ms"
+// stubbornProgram is a test program that ignores SIGTERM and creates the
+// returned ready file once its trap is installed, so a test can stop it
+// without racing its startup.
+func stubbornProgram(t *testing.T) (config.Program, string) {
+	t.Helper()
+	return namedStubbornProgram(t, "stubborn", "300ms")
+}
+
+// namedStubbornProgram is stubbornProgram under another name and stop timeout.
+func namedStubbornProgram(t *testing.T, name, stopTimeout string) (config.Program, string) {
+	t.Helper()
+	ready := filepath.Join(t.TempDir(), "ready")
+	program := testProgram(name, `trap "" TERM; : > "`+ready+`"; while true; do sleep 1; done`)
+	program.StopTimeout = stopTimeout
+	return program, ready
+}
+
+// unsignalable makes the daemon's signals to pid fail with EPERM while run
+// executes, as they would for a process running as another user.
+func unsignalable(t *testing.T, pid int, run func()) {
+	t.Helper()
+	real := signalGroup
+	signalGroup = func(target int, sig syscall.Signal) error {
+		if target == -pid {
+			return syscall.EPERM
+		}
+		return real(target, sig)
+	}
+	defer func() { signalGroup = real }()
+	run()
+}
+
+func TestManagerApplyWaitsForRemovedProcessExit(t *testing.T) {
+	program, ready := stubbornProgram(t)
 	manager := New([]config.Program{program})
 	defer manager.StopAll()
 	if err := manager.Start([]string{"stubborn"}); err != nil {
 		t.Fatal(err)
 	}
+	waitForReady(t, ready)
 	before, err := manager.Status([]string{"stubborn"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	removed, err := manager.ApplyDetached(nil)
-	if err != nil {
+	if err := manager.Apply(nil); err != nil {
 		t.Fatal(err)
-	}
-	if len(removed) != 1 {
-		t.Fatalf("removed = %+v", removed)
 	}
 	if _, err := manager.Status([]string{"stubborn"}); err == nil {
 		t.Fatal("removed process is still registered")
 	}
-	if err := syscall.Kill(before[0].PID, 0); err != nil {
-		t.Fatalf("removed process was stopped before StopRemoved: %v", err)
+	if err := syscall.Kill(before[0].PID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("removed process survived Apply: %v", err)
 	}
+}
 
-	if err := manager.StopRemoved(removed); err != nil {
+func TestManagerApplyStopsRemovedProcessesConcurrently(t *testing.T) {
+	var (
+		programs []config.Program
+		ready    []string
+	)
+	for _, name := range []string{"first", "second", "third"} {
+		program, file := namedStubbornProgram(t, name, "400ms")
+		programs = append(programs, program)
+		ready = append(ready, file)
+	}
+	manager := New(programs)
+	defer manager.StopAll()
+	if err := manager.Start(nil); err != nil {
 		t.Fatal(err)
 	}
+	for _, file := range ready {
+		waitForReady(t, file)
+	}
+
+	started := time.Now()
+	if err := manager.Apply(nil); err != nil {
+		t.Fatal(err)
+	}
+	// One after another the three shutdowns take at least 1.2s.
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Apply took %s to stop three processes with a 400ms timeout", elapsed)
+	}
+}
+
+func TestManagerActionsDoNotWaitForSlowReload(t *testing.T) {
+	stubborn, ready := namedStubbornProgram(t, "stubborn", "800ms")
+	quick := testProgram("quick", "sleep 30")
+	manager := New([]config.Program{stubborn, quick})
+	defer manager.StopAll()
+	if err := manager.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForReady(t, ready)
+
+	applied := make(chan error, 1)
+	go func() { applied <- manager.Apply([]config.Program{quick}) }()
+	// The stubborn program leaves the table at once; only its shutdown is slow.
+	waitFor(t, time.Second, func() bool {
+		_, err := manager.Status([]string{"stubborn"})
+		return err != nil
+	})
+	started := time.Now()
+	if err := manager.Stop([]string{"quick"}); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 400*time.Millisecond {
+		t.Fatalf("stopping another process took %s behind a slow shutdown", elapsed)
+	}
+	select {
+	case err := <-applied:
+		t.Fatalf("reload finished before the shutdown it waits for: %v", err)
+	default:
+	}
+	if err := <-applied; err != nil {
+		t.Fatal(err)
+	}
+	if statuses, err := manager.Status([]string{"quick"}); err != nil || statuses[0].State != StateStopped {
+		t.Fatalf("quick was not stopped: %+v, err = %v", statuses, err)
+	}
+}
+
+func TestManagerStopWaitsForRestartOnTheSameProcess(t *testing.T) {
+	stubborn, ready := namedStubbornProgram(t, "stubborn", "800ms")
+	manager := New([]config.Program{stubborn})
+	defer manager.StopAll()
+	if err := manager.Start([]string{"stubborn"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForReady(t, ready)
+
+	restarted := make(chan error, 1)
+	go func() { restarted <- manager.Restart([]string{"stubborn"}) }()
+	waitFor(t, time.Second, func() bool {
+		statuses, _ := manager.Status([]string{"stubborn"})
+		return len(statuses) == 1 && statuses[0].State == StateStopping
+	})
+	// Changes to one process still queue behind each other, so the stop lands
+	// on the process the restart brings up.
+	if err := manager.Stop([]string{"stubborn"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-restarted:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatal("stop returned while the restart it must wait for was still running")
+	}
+	if statuses, err := manager.Status([]string{"stubborn"}); err != nil || statuses[0].State != StateStopped || statuses[0].PID != 0 {
+		t.Fatalf("stop did not win over the restart: %+v, err = %v", statuses, err)
+	}
+}
+
+func TestManagerStopAllWaitsForReloadShutdown(t *testing.T) {
+	stubborn, ready := namedStubbornProgram(t, "stubborn", "800ms")
+	quick := testProgram("quick", "sleep 30")
+	manager := New([]config.Program{stubborn, quick})
+	if err := manager.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForReady(t, ready)
+	before, err := manager.Status([]string{"stubborn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	applied := make(chan error, 1)
+	go func() { applied <- manager.Apply([]config.Program{quick}) }()
+	waitFor(t, time.Second, func() bool {
+		_, err := manager.Status([]string{"stubborn"})
+		return err != nil
+	})
+	stopped := make(chan error, 1)
+	go func() { stopped <- manager.StopAll() }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("StopAll returned while a reload's shutdown was still running: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := syscall.Kill(before[0].PID, 0); err != nil {
+		t.Fatalf("shutdown finished before its stop timeout: %v", err)
+	}
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("StopAll did not return")
+	}
+	<-applied
 	if err := syscall.Kill(before[0].PID, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("removed process survived StopRemoved: %v", err)
+		t.Fatalf("removed process survived StopAll: %v", err)
+	}
+	if err := manager.Start([]string{"quick"}); err == nil || !strings.Contains(err.Error(), "shutting down") {
+		t.Fatalf("action accepted after StopAll: %v", err)
+	}
+}
+
+func TestManagerKeepsProcessListedWhenRemovalCannotStopIt(t *testing.T) {
+	program := testProgram("stuck", "sleep 30")
+	other := testProgram("other", "sleep 30")
+	manager := New([]config.Program{program})
+	defer manager.StopAll()
+	if err := manager.Start([]string{"stuck"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := manager.Status([]string{"stuck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unsignalable(t, before[0].PID, func() {
+		err := manager.Apply(nil)
+		if err == nil || !strings.Contains(err.Error(), "stuck could not be stopped") {
+			t.Fatalf("removal error = %v", err)
+		}
+		after, err := manager.Status([]string{"stuck"})
+		if err != nil || after[0].PID != before[0].PID || !strings.Contains(after[0].LastError, "could not be stopped") {
+			t.Fatalf("unstoppable process is no longer listed with its error: %+v, err = %v", after, err)
+		}
+		// The same removal is not retried, and it must not fail other changes.
+		if err := manager.Apply(nil); err != nil {
+			t.Fatalf("unchanged removal was retried: %v", err)
+		}
+		if err := manager.Apply([]config.Program{other}); err != nil {
+			t.Fatalf("adding a program failed because of the unstoppable process: %v", err)
+		}
+		if statuses, err := manager.Status(nil); err != nil || len(statuses) != 2 {
+			t.Fatalf("statuses = %+v, err = %v; want the unstoppable and the new program", statuses, err)
+		}
+	})
+
+	// Once the process is gone on its own, the removal completes.
+	if err := syscall.Kill(before[0].PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool {
+		statuses, _ := manager.Status([]string{"stuck"})
+		return len(statuses) == 1 && statuses[0].PID == 0
+	})
+	if err := manager.Apply([]config.Program{other}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Status([]string{"stuck"}); err == nil {
+		t.Fatal("exited process was not removed")
+	}
+}
+
+func TestManagerRetriesFailedReplacementOnlyForANewDefinition(t *testing.T) {
+	program := testProgram("worker", "sleep 30")
+	other := testProgram("other", "sleep 30")
+	manager := New([]config.Program{program})
+	defer manager.StopAll()
+	if err := manager.Start([]string{"worker"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := manager.Status([]string{"worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := program
+	edited.Args = []string{"-c", "sleep 29"}
+
+	unsignalable(t, before[0].PID, func() {
+		err := manager.Apply([]config.Program{edited})
+		if err == nil || !strings.Contains(err.Error(), "worker could not be stopped") {
+			t.Fatalf("replacement error = %v", err)
+		}
+		// The old run stays, and neither the same edit nor an unrelated change fails again.
+		if err := manager.Apply([]config.Program{edited}); err != nil {
+			t.Fatalf("unchanged edit was retried: %v", err)
+		}
+		if err := manager.Apply([]config.Program{edited, other}); err != nil {
+			t.Fatalf("adding a program failed because of the unstoppable process: %v", err)
+		}
+		if statuses, err := manager.Status([]string{"worker"}); err != nil || statuses[0].PID != before[0].PID {
+			t.Fatalf("old run was replaced: %+v, err = %v", statuses, err)
+		}
+		// Editing it again is a new request and is reported again.
+		edited.Args = []string{"-c", "sleep 28"}
+		if err := manager.Apply([]config.Program{edited, other}); err == nil {
+			t.Fatal("a new edit of the unstoppable process was not reported")
+		}
+	})
+}
+
+func waitForReady(t *testing.T, ready string) {
+	t.Helper()
+	waitFor(t, time.Second, func() bool {
+		_, err := os.Stat(ready)
+		return err == nil
+	})
+}
+
+// Status runs concurrently with the lifecycle actions, so everything it reads
+// must be protected at a finer grain while Apply rewrites metadata in parallel.
+func TestManagerStatusDoesNotRaceWithApply(t *testing.T) {
+	first := testProgram("first", "sleep 30")
+	first.Group = "workers"
+	second := testProgram("second", "sleep 30")
+	second.Group = "workers" // stays in the group while first moves in and out
+	manager := New([]config.Program{first, second})
+	defer manager.StopAll()
+
+	var statusErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			if _, err := manager.Status([]string{"group:workers"}); err != nil {
+				statusErr = err
+				return
+			}
+			if _, err := manager.Status(nil); err != nil {
+				statusErr = err
+				return
+			}
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if i%2 == 0 {
+			first.Group = "critical"
+		} else {
+			first.Group = "workers"
+		}
+		if err := manager.Apply([]config.Program{first, second}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-done
+	if statusErr != nil {
+		t.Fatal(statusErr)
+	}
+	if statuses, err := manager.Status([]string{"group:workers"}); err != nil || len(statuses) != 2 {
+		t.Fatalf("group status = %+v, err = %v; want both programs", statuses, err)
+	}
+}
+
+// Every kind of request hammers the same processes at once. Individual calls
+// may fail ("already active" and the like); what must never happen is a data
+// race, a deadlock, or a process left behind.
+func TestManagerConcurrentLifecycleOperations(t *testing.T) {
+	dir := t.TempDir()
+	programs := []config.Program{
+		testProgram("first", "sleep 30"), testProgram("second", "sleep 30"), testProgram("third", "sleep 30"),
+	}
+	for i := range programs {
+		programs[i].StopTimeout = "100ms"
+	}
+	edited := append([]config.Program(nil), programs...)
+	edited[0].Args = []string{"-c", "sleep 29"}
+	renamed := []config.Program{programs[0], testProgram("renamed", "sleep 30"), programs[2]}
+	states, err := NewProgramStateStore(filepath.Join(dir, ProgramStateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewWithState(programs, nil, states)
+	if err := manager.Start(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var workers sync.WaitGroup
+	hammer := func(request func(int)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for i := 0; i < 60; i++ {
+				request(i)
+			}
+		}()
+	}
+	hammer(func(int) { _, _ = manager.Status(nil); _, _ = manager.Status([]string{"group:default"}) })
+	hammer(func(i int) {
+		switch i % 3 {
+		case 0:
+			_ = manager.Apply(programs)
+		case 1:
+			_ = manager.Apply(edited)
+		default:
+			_ = manager.Apply(renamed)
+		}
+	})
+	hammer(func(int) { _ = manager.Start([]string{"first"}); _ = manager.Stop([]string{"second"}) })
+	hammer(func(int) {
+		_ = manager.Restart([]string{"third"})
+		_ = manager.RestartConfigured([]string{"first"}, programs)
+	})
+	hammer(func(int) { _ = manager.Pause([]string{"second"}); _ = manager.Resume([]string{"second"}) })
+	workers.Wait()
+
+	_ = manager.Apply(programs)
+	if err := manager.StopAll(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first", "second", "third", "renamed"} {
+		if statuses, err := manager.Status([]string{name}); err == nil && statuses[0].PID != 0 {
+			t.Fatalf("%s survived StopAll: %+v", name, statuses[0])
+		}
 	}
 }
 
