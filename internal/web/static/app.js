@@ -9,6 +9,8 @@ const ICON = {
 // semantic order for state sorting (healthier first)
 const STATE_ORDER = { RUNNING: 0, BACKOFF: 1, STOPPING: 2, STARTING: 3, STOPPED: 4, EXITED: 5, FATAL: 6 };
 
+const ACTION_LABELS = { start: '启动', stop: '停止', restart: '重启', 'reset-restarts': '清零重启数', pause: '暂停', resume: '恢复' };
+
 // 可隐藏的列：key 对应 body.hide-col-<key>、th.col-<key>、td.cell-<key>
 const COLUMNS = [
   { key: 'group', label: '分组', width: 12 },
@@ -36,6 +38,7 @@ const state = {
   filter: 'all', groupFilter: 'all', query: '',
   selected: null, selectedNames: new Set(), editingName: null,
   logController: null, logPaused: false, confirmAction: null,
+  deleting: new Set(),
   logContent: '', logQuery: '', logMatchIndex: -1,
   moreMenuName: null,
   restartEvents: new Map(),
@@ -540,29 +543,41 @@ $('#column-menu').addEventListener('change', (event) => {
 /* ============================================================
    Actions (start / stop / restart / bulk)
    ============================================================ */
+// Action toasts. A request can wait for a process's stop timeout, so anything
+// still running after a moment gets a pending toast until the result arrives.
+function actionTarget(name) { return name === 'all' ? '全部进程' : name; }
+function actionProgress(action, target) {
+  return action === 'reset-restarts' ? `正在清零 ${target} 的重启数…` : `正在${ACTION_LABELS[action]} ${target}…`;
+}
+function actionDone(action, target) {
+  return action === 'reset-restarts' ? `已清零 ${target} 的重启数` : `已${ACTION_LABELS[action]} ${target}`;
+}
 async function requestAction(action, name = 'all') {
   const destructive = action === 'stop' || action === 'restart' || action === 'reset-restarts' || action === 'pause';
   if (destructive) {
-    const target = name === 'all' ? '全部进程' : name;
-    const message = action === 'reset-restarts' ? `确认将 ${target} 的重启数清零？` : `确认${{ stop: '停止', restart: '重启', pause: '暂停' }[action]} ${target}？`;
+    const target = actionTarget(name);
+    const message = action === 'reset-restarts' ? `确认将 ${target} 的重启数清零？` : `确认${ACTION_LABELS[action]} ${target}？`;
     return confirm(message, () => runAction(action, name));
   }
   return runAction(action, name);
 }
 async function runAction(action, name) {
+  const done = pendingToast(actionProgress(action, actionTarget(name)));
   try {
     const path = name === 'all' ? `/api/v1/actions/${action}` : `/api/v1/processes/${encodeURIComponent(name)}/${action}`;
-    const result = await api(path, { method: 'POST' });
+    await api(path, { method: 'POST' });
     if (action === 'restart') state.restartEvents.clear();
-    toast(result.message || '操作完成'); spinRefresh(); await loadProcesses();
-  } catch (error) { toast(error.message, true); }
+    done(); toast(actionDone(action, actionTarget(name))); spinRefresh(); await loadProcesses();
+  } catch (error) { done(); toast(error.message, true); }
 }
 async function runBulkAction(action, names) {
+  const target = `选中的 ${names.length} 个进程`;
+  const done = pendingToast(actionProgress(action, target));
   try {
-    const result = await api(`/api/v1/actions/${action}`, { method: 'POST', body: JSON.stringify({ names }) });
+    await api(`/api/v1/actions/${action}`, { method: 'POST', body: JSON.stringify({ names }) });
     if (action === 'restart') state.restartEvents.clear();
-    toast(result.message || '批量操作完成'); state.selectedNames.clear(); $('#bulk-action').value = ''; await loadProcesses();
-  } catch (error) { toast(error.message, true); }
+    done(); toast(actionDone(action, target)); state.selectedNames.clear(); $('#bulk-action').value = ''; await loadProcesses();
+  } catch (error) { done(); toast(error.message, true); }
 }
 
 $('#bulk-apply').addEventListener('click', () => {
@@ -572,7 +587,7 @@ $('#bulk-apply').addEventListener('click', () => {
   if (!names.length) return toast('请先选择进程', true);
   const execute = () => runBulkAction(action, names);
   if (action === 'stop' || action === 'restart' || action === 'reset-restarts' || action === 'pause') {
-    const message = action === 'reset-restarts' ? `确认将选中的 ${names.length} 个进程重启数清零？` : `确认${{ stop: '停止', restart: '重启', pause: '暂停' }[action]}选中的 ${names.length} 个进程？`;
+    const message = action === 'reset-restarts' ? `确认将选中的 ${names.length} 个进程重启数清零？` : `确认${ACTION_LABELS[action]}选中的 ${names.length} 个进程？`;
     confirm(message, execute);
   }
   else execute();
@@ -874,18 +889,22 @@ $('#process-form').addEventListener('submit', async event => {
     const program = processFormValue();
     const editing = state.editingName;
     const path = editing ? `/api/v1/processes/${encodeURIComponent(editing)}` : '/api/v1/processes';
-    const result = await api(path, { method: editing ? 'PUT' : 'POST', body: JSON.stringify(program) });
-    toast(result.message || '进程已保存'); closeProcessForm(); closeDrawer(); await refreshAll();
+    await api(path, { method: editing ? 'PUT' : 'POST', body: JSON.stringify(program) });
+    toast(`进程 ${program.name} 已${editing ? '保存' : '创建'}`); closeProcessForm(); closeDrawer(); await refreshAll();
   } catch (error) { $('#process-form-status').textContent = error.message; }
 });
 
 async function deleteProcess(name) {
+  // The row can outlive the request for a poll or two; ignore repeat deletes until it settles.
+  if (state.deleting.has(name)) return;
+  state.deleting.add(name); closeDrawer();
   // A running process is stopped before it is removed, which waits for its stop timeout.
   const done = pendingToast(`正在停止并删除进程 ${name}…`);
   try {
     await api(`/api/v1/processes/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    done(); toast(`进程 ${name} 已删除`); state.selectedNames.delete(name); closeDrawer(); await refreshAll();
+    done(); toast(`进程 ${name} 已删除`); state.selectedNames.delete(name); await refreshAll();
   } catch (error) { done(); toast(error.message, true); }
+  finally { state.deleting.delete(name); }
 }
 
 /* ============================================================
@@ -907,7 +926,7 @@ async function saveConfig() {
   $('#config-status').textContent = '正在保存...';
   try {
     const data = await api('/api/v1/config', { method: 'PUT', body: JSON.stringify({ content: $('#config-editor').value, apply: true }) });
-    $('#config-status').textContent = data.restart_required ? '已保存；Web 或运行目录变更需重启守护进程' : data.message;
+    $('#config-status').textContent = data.restart_required ? '已保存；Web 或运行目录变更需重启守护进程' : '配置已保存并已重新加载';
     toast($('#config-status').textContent); if (!data.restart_required) refreshAll();
   } catch (error) { $('#config-status').textContent = error.message; toast(error.message, true); }
 }
