@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,6 +24,7 @@ import (
 //
 //   - "detached": in a session of its own, so no signal to the spawner's
 //     process group reaches it, still holding the run's output pipes;
+//   - "writer": detached as well, and writing a line to stdout every 20ms;
 //   - "attached": in the spawner's group and ignoring SIGTERM, like a stuck
 //     worker;
 //   - "quiet": in the spawner's group with its output closed, like a helper
@@ -40,7 +42,7 @@ func helperLeftoverChild(t *testing.T) {
 		child := exec.Command(os.Args[0], "-test.run=^TestHelperLeftoverChild$")
 		child.Env = append(os.Environ(), "PM_TEST_HELPER="+kind)
 		child.Stdout, child.Stderr = os.Stdout, os.Stderr
-		if kind == "detached" {
+		if kind == "detached" || kind == "writer" {
 			child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		}
 		if err := child.Start(); err != nil {
@@ -64,6 +66,13 @@ func helperLeftoverChild(t *testing.T) {
 		// The pipe write ends this process was started with.
 		_ = syscall.Close(1)
 		_ = syscall.Close(2)
+	case "writer":
+		go func() {
+			for {
+				fmt.Fprintln(os.Stdout, "line")
+				time.Sleep(20 * time.Millisecond)
+			}
+		}()
 	case "detached":
 	default:
 		t.Fatalf("unknown helper mode %q", mode)
@@ -237,8 +246,9 @@ func TestOutputStreamsShareALogFile(t *testing.T) {
 	}
 }
 
-// Each run copies its output with its own goroutines. They must all be gone
-// once the run is over, whether the output ended on its own or timed out.
+// Each run copies its output with its own goroutines. They are gone once the
+// run is over, or, for a detached child that is still writing, as soon as that
+// child is.
 func TestOutputCopiesEndWithTheirRuns(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 	for _, kind := range []string{"ended", "detached"} {
@@ -247,6 +257,11 @@ func TestOutputCopiesEndWithTheirRuns(t *testing.T) {
 			marker   string
 			children []int
 		)
+		t.Cleanup(func() {
+			for _, child := range children {
+				_ = syscall.Kill(child, syscall.SIGKILL)
+			}
+		})
 		if kind == "ended" {
 			program = testProgram("writer", "echo line")
 			program.StdoutLog = filepath.Join(t.TempDir(), "out.log")
@@ -265,14 +280,93 @@ func TestOutputCopiesEndWithTheirRuns(t *testing.T) {
 				children = append(children, childPID(t, marker))
 			}
 		}
-		// One child per run still holds its output; the copies ended anyway.
+		if marker == "" {
+			waitFor(t, 3*time.Second, func() bool { return runtime.NumGoroutine() <= baseline })
+			continue
+		}
+		// One child per run outlives its run, still holding its output.
 		for _, child := range children {
 			if err := syscall.Kill(child, 0); err != nil {
 				t.Fatalf("detached child %d was ended: %v", child, err)
 			}
-			defer syscall.Kill(child, syscall.SIGKILL)
+			_ = syscall.Kill(child, syscall.SIGKILL)
 		}
 		waitFor(t, 3*time.Second, func() bool { return runtime.NumGoroutine() <= baseline })
+	}
+}
+
+// fileSize is the size of path, or 0 when it cannot be read.
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// A detached process that keeps writing must outlive its run: closing the
+// output would make its next write the end of it.
+func TestDetachedWriterOutlivesItsRunAndKeepsLogging(t *testing.T) {
+	program, ready, marker := leftoverChildProgram(t, "exiter", "writer", "200ms")
+	process := newProcess(program, nil)
+	if err := process.Start(); err != nil {
+		t.Fatal(err)
+	}
+	endChildWithTest(t, marker)
+	waitForReady(t, ready)
+	waitFor(t, 3*time.Second, func() bool { return process.Status().State == StateExited })
+
+	written := fileSize(program.StdoutLog)
+	waitFor(t, 3*time.Second, func() bool { return fileSize(program.StdoutLog) > written+100 })
+	if err := syscall.Kill(childPID(t, marker), 0); err != nil {
+		t.Fatalf("detached writer did not survive the end of its run: %v", err)
+	}
+}
+
+func TestLingeringStreamsAreCapped(t *testing.T) {
+	var streams []*output
+	t.Cleanup(func() {
+		lingering.Lock()
+		lingering.streams = nil
+		lingering.Unlock()
+		for _, stream := range streams {
+			stream.abandon()
+		}
+	})
+	lingering.Lock()
+	lingering.streams = nil
+	lingering.Unlock()
+
+	for range lingeringLimit + 2 {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer writer.Close()
+		stream := &output{reader: reader}
+		stream.linger()
+		streams = append(streams, stream)
+	}
+	// The two oldest were let go of; the rest are still open.
+	for i, stream := range streams {
+		if _, err := stream.reader.Stat(); (i < 2) != errors.Is(err, os.ErrClosed) {
+			t.Fatalf("stream %d of %d: stat error = %v", i, len(streams), err)
+		}
+	}
+	lingering.Lock()
+	count := len(lingering.streams)
+	lingering.Unlock()
+	if count != lingeringLimit {
+		t.Fatalf("lingering streams = %d, want %d", count, lingeringLimit)
+	}
+	for _, stream := range streams[2:] {
+		stream.forget()
+	}
+	lingering.Lock()
+	count = len(lingering.streams)
+	lingering.Unlock()
+	if count != 0 {
+		t.Fatalf("lingering streams after the copies ended = %d, want 0", count)
 	}
 }
 

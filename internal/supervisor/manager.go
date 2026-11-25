@@ -287,6 +287,7 @@ func newOutput(cmd *exec.Cmd, log io.WriteCloser, toStderr bool) (*output, io.Cl
 	stream := &output{reader: reader, drained: make(chan struct{})}
 	go func() {
 		defer close(stream.drained)
+		defer stream.forget()
 		defer closeLog(log)
 		defer reader.Close()
 		_, stream.copyErr = io.Copy(log, reader)
@@ -298,10 +299,45 @@ func newOutput(cmd *exec.Cmd, log io.WriteCloser, toStderr bool) (*output, io.Cl
 // holds the write end.
 func (o *output) abandon() { _ = o.reader.Close() }
 
+// linger keeps copying a stream whose run is over. A detached descendant may
+// still be writing, and closing the pipe would make it fail on its next
+// write. Past lingeringLimit the oldest stream is let go instead.
+func (o *output) linger() {
+	lingering.Lock()
+	defer lingering.Unlock()
+	lingering.streams = append(lingering.streams, o)
+	if len(lingering.streams) > lingeringLimit {
+		lingering.streams[0].abandon()
+		lingering.streams = lingering.streams[1:]
+	}
+}
+
+// forget drops a stream from the lingering ones once its copy has ended.
+func (o *output) forget() {
+	lingering.Lock()
+	defer lingering.Unlock()
+	for i, stream := range lingering.streams {
+		if stream == o {
+			lingering.streams = append(lingering.streams[:i], lingering.streams[i+1:]...)
+			return
+		}
+	}
+}
+
+// lingeringLimit is how many streams of ended runs may keep being copied, so
+// that a program which keeps leaving writing descendants behind cannot exhaust
+// the daemon's file descriptors.
+const lingeringLimit = 16
+
+var lingering struct {
+	sync.Mutex
+	streams []*output
+}
+
 // wait reports the end of a run once its process has exited and its output has
 // been written. A descendant still writing after the process exited gets the
-// time a stop may take to finish; past that the run is over, what is left of
-// the process group is killed, and the stream is let go.
+// time a stop may take to finish; past that the run is over and what is left
+// of the process group is killed.
 func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}, grace time.Duration, streams []*output) {
 	err := cmd.Wait()
 	close(p.exited)
@@ -329,10 +365,12 @@ func (p *Process) wait(cmd *exec.Cmd, runID, intentID uint64, done chan struct{}
 	}
 	if cut {
 		for _, stream := range streams {
-			stream.abandon()
+			if !closed(stream.drained) {
+				stream.linger()
+			}
 		}
-		// A descendant in a session of its own is out of reach; the rest of
-		// the process group is not.
+		// A descendant in a session of its own is out of reach and keeps
+		// writing to its stream; the rest of the process group is not.
 		notes = append(notes, "background process kept the output open after the process exited")
 		if leftover := alreadyGone(signalGroup(-cmd.Process.Pid, syscall.SIGKILL)); leftover != nil {
 			notes = append(notes, leftover.Error())

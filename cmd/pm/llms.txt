@@ -294,9 +294,10 @@ changes again.
 
 After a process exits, a descendant that inherited its output can keep the
 run open for at most one more `stop_timeout`. Past that the run is over:
-whatever is left of the process group is killed, the exit carries a last
-error saying so, and a descendant in a session of its own is left running
-but its output is no longer recorded.
+whatever is left of the process group is killed and the exit carries a last
+error saying so. A descendant in a session of its own is out of reach: it
+keeps running and stays logged until it exits (at most 16 such streams stay
+open, and the oldest is dropped past that).
 
 ## Common tasks for agents
 
